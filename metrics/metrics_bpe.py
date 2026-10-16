@@ -93,7 +93,9 @@ class DeepSCMetrics:
         semantic_model: str = "sentence-transformers/paraphrase-multilingual-mpnet-base-v2",
         device: Optional[str] = None,
     ):
-        self.sp = sp
+        self.sp = (
+            sentencepiece_processor(sp) if isinstance(sp, (str, bytes)) else sp
+        )
         self.semantic_model = SentenceTransformer(
             semantic_model,
             device=device,
@@ -403,9 +405,49 @@ class DeepSCMetrics:
         return pd.DataFrame(rows)
 
 
+def sentencepiece_processor(model_path):
+    """Load and validate a SentencePiece model used for text decoding."""
+    processor = spm.SentencePieceProcessor(model_file=str(model_path))
+    if processor.get_piece_size() == 0:
+        raise ValueError(f"Empty SentencePiece model: {model_path}")
+    return processor
+
+
+EVALUATION_COLUMNS = [
+    "sample_id", "model", "channel", "snr_db", "trial_seed",
+    "reference", "hypothesis", "checkpoint",
+]
+
+
+def summarize_reconstruction_groups(df: pd.DataFrame) -> pd.DataFrame:
+    """Compute corpus metrics for each model/channel/SNR/trial group."""
+    required = set(EVALUATION_COLUMNS)
+    missing = required - set(df.columns)
+    if missing:
+        raise ValueError(f"Missing required evaluation columns: {sorted(missing)}")
+    group_cols = ["model", "channel", "snr_db", "trial_seed", "checkpoint"]
+    rows = []
+    for keys, group in df.groupby(group_cols, dropna=False, sort=True):
+        references = [normalize_text(value) for value in group["reference"]]
+        hypotheses = [normalize_text(value) for value in group["hypothesis"]]
+        row = dict(zip(group_cols, keys))
+        row.update({
+            "sample_count": len(group),
+            "corpus_bleu": float(sacrebleu.corpus_bleu(hypotheses, [references]).score),
+            "corpus_chrf": float(
+                sacrebleu.corpus_chrf(hypotheses, [references], word_order=2).score
+            ),
+        })
+        for column in ("semantic_similarity", "rouge_l", "exact_match_rate", "token_accuracy"):
+            if column in group:
+                row[column] = float(group[column].mean())
+        rows.append(row)
+    return pd.DataFrame(rows).sort_values(group_cols).reset_index(drop=True)
+
+
 def summarize_by_snr(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Average sentence-level metrics for every SNR.
+    Compatibility wrapper for publication grouping with corpus BLEU.
 
     Expected columns:
         snr
@@ -416,45 +458,13 @@ def summarize_by_snr(df: pd.DataFrame) -> pd.DataFrame:
         exact_match_rate
         token_accuracy
     """
-    required = {
-        "snr",
-        "bleu",
-        "chrf",
-        "semantic_similarity",
-        "rouge_l",
-        "exact_match_rate",
-        "token_accuracy",
-    }
-
-    missing = required - set(df.columns)
-
-    if missing:
-        raise ValueError(
-            f"Missing required columns: {sorted(missing)}"
-        )
-
-    group_cols = ["snr"]
-
-    if "system" in df.columns:
-        group_cols.append("system")
-
-    metric_cols = [
-        "bleu",
-        "chrf",
-        "semantic_similarity",
-        "rouge_l",
-        "exact_match_rate",
-        "token_accuracy",
-    ]
-
-    summary = (
-        df.groupby(group_cols, as_index=False)[metric_cols]
-        .mean()
-        .sort_values(group_cols)
-        .reset_index(drop=True)
-    )
-
-    return summary
+    renamed = df.rename(columns={"snr": "snr_db", "system": "model"}).copy()
+    defaults = {"model": "unspecified", "channel": "unspecified", "trial_seed": 0,
+                "checkpoint": "unspecified", "sample_id": range(len(renamed))}
+    for column, value in defaults.items():
+        if column not in renamed:
+            renamed[column] = value
+    return summarize_reconstruction_groups(renamed)
 
 
 if __name__ == "__main__":
@@ -463,7 +473,7 @@ if __name__ == "__main__":
     # --------------------------------------------------------------
 
     evaluator = DeepSCMetrics(
-        tokenizer_model=(
+        sp=(
             "./data/train/europarl_bpe/tokenizer_bpe.model"
         ),
         device="cuda",  # use "cpu" if needed

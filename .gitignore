@@ -22,5 +22,17 @@ europarl.tgz
 .continue/
 *.pth
 results
+!results/
+results/*
+!results/article_kd/
+!results/article_kd/README.md
+!results/article_kd/manifests/
+!results/article_kd/manifests/.gitkeep
+!results/article_kd/training/
+!results/article_kd/training/.gitkeep
+!results/article_kd/evaluation/
+!results/article_kd/evaluation/.gitkeep
+!results/article_kd/figures/
+!results/article_kd/figures/.gitkeep
 student
 *.txt
