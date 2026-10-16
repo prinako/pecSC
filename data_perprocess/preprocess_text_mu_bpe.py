@@ -38,7 +38,8 @@ import random
 import argparse
 import tempfile
 import unicodedata
-from datetime import date
+import hashlib
+import subprocess
 
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Sequence, Tuple
@@ -216,22 +217,77 @@ def make_split_ids(
     val_ratio,
     seed,
 ):
+    validate_split_ratios(train_ratio, val_ratio, len(base_records))
     ids = [record["id"] for record in base_records]
 
     if len(ids) != len(set(ids)):
         raise ValueError("Duplicate IDs detected in en_en.")
 
+    groups: Dict[str, List[Any]] = {}
+    for record in base_records:
+        groups.setdefault(normalize_text(record["source"]), []).append(record["id"])
+    grouped_ids = list(groups.values())
     rng = random.Random(seed)
-    rng.shuffle(ids)
-
-    train_end = int(len(ids) * train_ratio)
-    val_end = train_end + int(len(ids) * val_ratio)
-
-    train_ids = set(ids[:train_end])
-    val_ids = set(ids[train_end:val_end])
-    test_ids = set(ids[val_end:])
+    rng.shuffle(grouped_ids)
+    train_target = int(len(ids) * train_ratio)
+    val_target = int(len(ids) * val_ratio)
+    partitions = [set(), set(), set()]
+    for group in grouped_ids:
+        destination = 0 if len(partitions[0]) < train_target else (
+            1 if len(partitions[1]) < val_target else 2
+        )
+        partitions[destination].update(group)
+    train_ids, val_ids, test_ids = partitions
+    validate_disjoint_ids(train_ids, val_ids, test_ids)
+    if any(not partition for partition in partitions):
+        raise ValueError(
+            "Normalized-content grouping produced an empty split; use more records or revise ratios"
+        )
 
     return train_ids, val_ids, test_ids
+
+
+def validate_split_ratios(train_ratio: float, val_ratio: float, record_count: int) -> None:
+    test_ratio = 1.0 - train_ratio - val_ratio
+    if not 0 < train_ratio < 1 or not 0 < val_ratio < 1 or not 0 < test_ratio < 1:
+        raise ValueError("train, validation and test ratios must each be between 0 and 1")
+    counts = [int(record_count * train_ratio), int(record_count * val_ratio)]
+    counts.append(record_count - sum(counts))
+    if record_count < 3 or any(count < 1 for count in counts):
+        raise ValueError(
+            f"Split ratios do not produce three non-empty partitions for {record_count} records"
+        )
+
+
+def validate_disjoint_ids(train_ids: set, val_ids: set, test_ids: set) -> None:
+    if train_ids & val_ids or train_ids & test_ids or val_ids & test_ids:
+        raise ValueError("Duplicate record IDs detected across dataset splits")
+
+
+def normalized_content_overlaps(base_records, split_ids) -> Dict[str, int]:
+    content = {
+        split: {normalize_text(r["source"]) for r in base_records if r["id"] in ids}
+        for split, ids in split_ids.items()
+    }
+    return {
+        "train_val": len(content["train"] & content["val"]),
+        "train_test": len(content["train"] & content["test"]),
+        "val_test": len(content["val"] & content["test"]),
+    }
+
+
+def sha256_file(path: str | Path) -> str:
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def source_identity(path: str | Path) -> Dict[str, Any]:
+    resolved = Path(path).resolve()
+    return {"path": str(resolved), "sha256": sha256_file(resolved),
+            "size_bytes": resolved.stat().st_size}
 
 
 # BPE training corpus
@@ -730,6 +786,7 @@ def main() -> None:
     parser.add_argument(
         "--output-dir",
         default="data/train/europarl_bpe",
+        help="Exact output directory; choose a new dated/versioned directory per dataset",
     )
 
     parser.add_argument(
@@ -781,6 +838,10 @@ def main() -> None:
         "--force-retrain-tokenizer",
         action="store_true",
         help="Retrain tokenizer even if tokenizer_bpe.model already exists.",
+    )
+    parser.add_argument(
+        "--allow-existing-tokenizer", action="store_true",
+        help="Explicitly allow tokenizer reuse; do not use for a fresh publication dataset",
     )
 
     # Sequence filtering
@@ -835,43 +896,16 @@ def main() -> None:
             "--max-len must be >= --min-len."
         )
 
-    if not 0.0 < args.train_ratio < 1.0:
-        raise ValueError(
-            "--train-ratio must be between 0 and 1."
-        )
-
     # Seed
     random.seed(args.seed)
 
-    # setup output_dir
-    today = date.today()
-    args.output_dir = os.path.join(args.output_dir, today.strftime("%Y-%m-%d"))
+    # --output-dir is exact; hidden date suffixes make provenance ambiguous.
     os.makedirs(args.output_dir, exist_ok=True)
     
 
     # Enabled datasets
-    dataset_paths = {
-        "en_en": os.path.join(
-            args.data_dir,
-            args.en_en_file,
-        ),
-        "en_pt": os.path.join(
-            args.data_dir,
-            args.en_pt_file,
-        ),
-
-        # Enable later when ready:
-        "en_es": os.path.join(args.data_dir, args.en_es_file),
-        "en_fr": os.path.join(args.data_dir, args.en_fr_file),
-    }
-
-    language_map = {
-        "en_en": "en",
-        "en_pt": "pt",
-
-        "en_es": "es",
-        "en_fr": "fr",
-    }
+    dataset_paths = {"en_en": os.path.join(args.data_dir, args.en_en_file)}
+    language_map = {"en_en": "en"}
 
     # Load
     print("\n" + "=" * 70)
@@ -894,6 +928,7 @@ def main() -> None:
     print("=" * 70)
 
     base_records = raw_datasets["en_en"]
+    validate_split_ratios(args.train_ratio, args.val_ratio, len(base_records))
 
     for name in raw_datasets:
         if name == "en_en":
@@ -916,6 +951,13 @@ def main() -> None:
         val_ratio=args.val_ratio,
         seed=args.seed,
     )
+    split_ids = {"train": train_ids, "val": val_ids, "test": test_ids}
+    overlaps = normalized_content_overlaps(base_records, split_ids)
+    if any(overlaps.values()):
+        raise RuntimeError(f"Normalized-content leakage remains: {overlaps}")
+    split_id_path = os.path.join(args.output_dir, "split_ids.json")
+    with open(split_id_path, "x", encoding="utf-8") as handle:
+        json.dump({name: sorted(ids, key=str) for name, ids in split_ids.items()}, handle, indent=2)
 
     print("\n" + "=" * 70)
     print("SHARED TRAIN / TEST SPLIT")
@@ -933,10 +975,14 @@ def main() -> None:
     model_path = model_prefix + ".model"
     vocab_sp_path = model_prefix + ".vocab"
 
-    should_train = (
-        args.force_retrain_tokenizer
-        or not os.path.exists(model_path)
-    )
+    if os.path.exists(model_path) and not (
+        args.force_retrain_tokenizer or args.allow_existing_tokenizer
+    ):
+        raise FileExistsError(
+            f"Tokenizer already exists: {model_path}. Use a fresh --output-dir, "
+            "--force-retrain-tokenizer, or explicitly --allow-existing-tokenizer."
+        )
+    should_train = args.force_retrain_tokenizer or not os.path.exists(model_path)
 
     if should_train:
         print("\n" + "=" * 70)
@@ -1020,6 +1066,9 @@ def main() -> None:
     print("ENCODING DEEPSC BPE DATASETS")
     print("=" * 70)
 
+    accepted_counts = {}
+    filtering_stats = {}
+    output_files = {}
     for dataset_name, target_language in language_map.items():
         records = raw_datasets[dataset_name]
 
@@ -1089,11 +1138,65 @@ def main() -> None:
         save_pickle(train_data, train_path)
         save_pickle(val_data, val_path)
         save_pickle(test_data, test_path)
+        accepted_counts[dataset_name] = {
+            "train": len(train_data), "val": len(val_data), "test": len(test_data)
+        }
+        filtering_stats[dataset_name] = {
+            "train": train_stats, "val": val_stats, "test": test_stats
+        }
+        output_files[dataset_name] = {
+            "train": source_identity(train_path), "val": source_identity(val_path),
+            "test": source_identity(test_path),
+        }
 
         print(f"\nSaved:")
         print(f"  {train_path}")
         print(f"  {val_path}")
         print(f"  {test_path}")
+
+    try:
+        revision = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], text=True, stderr=subprocess.DEVNULL
+        ).strip()
+    except (OSError, subprocess.CalledProcessError):
+        revision = None
+    duplicate_rows = len(base_records) - len(
+        {normalize_text(record["source"]) for record in base_records}
+    )
+    manifest = {
+        "schema_version": 1,
+        "source_files": {name: source_identity(path) for name, path in dataset_paths.items()},
+        "preprocessing_seed": args.seed,
+        "split_ratios": {"train": args.train_ratio, "validation": args.val_ratio,
+                         "test": 1.0 - args.train_ratio - args.val_ratio},
+        "record_counts": {"before_filtering": len(base_records),
+                          "split_ids": {name: len(ids) for name, ids in split_ids.items()},
+                          "accepted_after_filtering": accepted_counts},
+        "duplicate_policy": (
+            "retain every record and assign identical normalized English sources to one split"
+        ),
+        "duplicate_statistics": {"duplicate_rows_beyond_unique": duplicate_rows,
+                                 "cross_split_overlaps": overlaps},
+        "record_ids_disjoint": True,
+        "split_id_file": source_identity(split_id_path),
+        "tokenizer": {**source_identity(model_path), "trained_from": "training IDs only",
+                      "reused_existing": not should_train,
+                      "actual_vocab_size": tokenizer.get_piece_size(),
+                      "special_token_ids": {
+                          token: tokenizer.piece_to_id(token) for token in SPECIAL_TOKENS
+                      }},
+        "vocabulary_json": source_identity(vocab_json_path),
+        "maximum_content_length": args.max_len,
+        "maximum_stored_sequence_length": args.max_len + 3,
+        "preprocessing_configuration": vars(args),
+        "implementation_revision": revision,
+        "filtering_statistics": filtering_stats,
+        "output_files": output_files,
+    }
+    manifest_path = os.path.join(args.output_dir, "dataset_manifest.json")
+    with open(manifest_path, "x", encoding="utf-8") as handle:
+        json.dump(manifest, handle, ensure_ascii=False, indent=2, sort_keys=True)
+        handle.write("\n")
 
     # Finished
     print("\n" + "=" * 70)

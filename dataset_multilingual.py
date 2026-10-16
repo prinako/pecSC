@@ -1,5 +1,6 @@
 import os
 import pickle
+from pathlib import Path
 
 import torch
 from torch.utils.data import Dataset
@@ -26,17 +27,15 @@ class EurParallelDatasetBPE(Dataset):
                 f"split must be 'train', 'val', or 'test', got {split!r}"
             )
 
-        pkl_path = os.path.join(
-            data_dir,
-            f"{split}_{language}.pkl",
-        )
+        root = Path(data_dir).expanduser().resolve()
+        pkl_path = root / f"{split}_{language}.pkl"
 
-        if not os.path.exists(pkl_path):
+        if not pkl_path.is_file():
             raise FileNotFoundError(
                 f"BPE dataset not found: {pkl_path}"
             )
 
-        with open(pkl_path, "rb") as f:
+        with pkl_path.open("rb") as f:
             self.data = pickle.load(f)
 
         if self.data:
