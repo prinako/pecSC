@@ -276,7 +276,7 @@ def main():
     args = parser.parse_args()
     setup_seed(args.seed)
     data_dir, vocab_file, dataset_files = resolve_training_inputs(
-        args.data_dir, args.vocab_file, args.en
+        args.data_dir, args.vocab_file, args.en, args.MAX_LENGTH
     )
     args.data_dir = str(data_dir)
     args.vocab_file = str(vocab_file)
