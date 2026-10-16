@@ -92,10 +92,12 @@ def test_explicit_dataset_directory_and_missing_files(tmp_path):
         with (tmp_path / f"{split}_en_en.pkl").open("wb") as handle:
             pickle.dump([([1, 2], [1, 2])], handle)
     (tmp_path / "vocab_bpe.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "dataset_manifest.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "tokenizer_bpe.model").write_bytes(b"synthetic tokenizer")
     root, vocab, paths = resolve_training_inputs(tmp_path, "vocab_bpe.json")
     assert root == tmp_path.resolve()
     assert vocab == (tmp_path / "vocab_bpe.json").resolve()
-    assert set(paths) == {"train", "val"}
+    assert set(paths) == {"train", "val", "dataset_manifest", "tokenizer_model"}
     assert len(EurParallelDatasetBPE("en_en", "train", tmp_path)) == 1
 
 
