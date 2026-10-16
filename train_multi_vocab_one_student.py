@@ -7,7 +7,7 @@ from tqdm import tqdm
 from dataset_multilingual import EurParallelDatasetBPE, collate_parallelBPE
 from dataset import EurDataset, collate_data
 
-from datetime import date
+from datetime import datetime
 import argparse
 import json
 import os
@@ -38,6 +38,11 @@ from utils.model_utils import (
     snr_to_noise, 
     save_student_receiver
 )
+from utils.experiment_manifest import (
+    base_training_manifest, create_run_directory, file_identity,
+    update_selected_checkpoint, write_manifest,
+)
+from utils.publication_data import resolve_training_inputs
 
 
 def parse_args():
@@ -45,14 +50,26 @@ def parse_args():
 
     # files
     parser.add_argument(
-        "--vocab-file", type=str, default="./data/train/europarl_bpe/vocab_bpe.json"
+        "--data-dir", required=True,
+        help="Explicit directory containing train_en_en.pkl and val_en_en.pkl",
     )
     parser.add_argument(
-        "--teacher-checkpoint", type=str, default="./checkpoints/deepsc-Rayleigh/multilingual_bpe/2026-09-15"
+        "--vocab-file", type=str, default="vocab_bpe.json",
+        help="Absolute path or path relative to --data-dir",
+    )
+    parser.add_argument(
+        "--teacher-encoder", type=str, required=True,
+        help="Teacher checkpoint containing encoder and channel_encoder",
+    )
+    parser.add_argument(
+        "--teacher-decoder", type=str, required=True,
+        help="Teacher checkpoint containing channel_decoder, decoder and dense",
     )
     parser.add_argument(
         "--save-dir", type=str, default="./checkpoints/deepsc-Rayleigh/multi_vocab_kd_bpe"
     )
+    parser.add_argument("--experiment-id", type=str,
+                        help="Unique run directory name (default: generated UTC timestamp)")
 
     # model config (must match teacher checkpoint)
     parser.add_argument("--max-len", type=int, default=67)
@@ -96,6 +113,75 @@ def parse_args():
     parser.add_argument('--pt-fr', default='pt_fr', type=str)
 
     return parser.parse_args()
+
+
+def validate_loss_configuration(alpha: float, beta: float, gamma: float, temperature: float) -> str:
+    if min(alpha, beta, gamma) < 0:
+        raise ValueError("Loss weights alpha, beta and gamma must be non-negative")
+    if alpha + beta + gamma <= 0:
+        raise ValueError("At least one loss weight must be positive")
+    if temperature <= 0:
+        raise ValueError("temperature must be positive")
+    return "CE-only Student" if beta == 0 and gamma == 0 else "KD Student"
+
+
+def load_teacher_checkpoints(model, encoder_path, decoder_path, device, expected_architecture=None):
+    paths = [os.path.abspath(os.path.expanduser(p)) for p in (encoder_path, decoder_path)]
+    for path in paths:
+        if not os.path.isfile(path):
+            raise FileNotFoundError(f"Teacher checkpoint does not exist: {path}")
+    enc = torch.load(paths[0], map_location=device, weights_only=True)
+    dec = torch.load(paths[1], map_location=device, weights_only=True)
+    expected_enc = {"encoder", "channel_encoder"}
+    expected_dec = {"channel_decoder", "decoder", "dense"}
+    if not isinstance(enc, dict) or not expected_enc.issubset(enc):
+        raise ValueError(f"Teacher encoder checkpoint must contain {sorted(expected_enc)}")
+    if not isinstance(dec, dict) or not expected_dec.issubset(dec):
+        raise ValueError(f"Teacher decoder checkpoint must contain {sorted(expected_dec)}")
+    unexpected_enc = set(enc) - expected_enc - {"meta"}
+    unexpected_dec = set(dec) - expected_dec - {"meta"}
+    if unexpected_enc or unexpected_dec:
+        raise ValueError(
+            f"Unexpected Teacher checkpoint components: encoder={sorted(unexpected_enc)}, "
+            f"decoder={sorted(unexpected_dec)}"
+        )
+    if enc.get("meta") != dec.get("meta"):
+        raise ValueError("Teacher encoder and decoder checkpoint metadata do not match")
+    if expected_architecture is not None:
+        recorded = enc.get("meta", {}).get("architecture")
+        if recorded is None:
+            raise ValueError(
+                "Teacher checkpoint lacks architecture metadata required for a publication run"
+            )
+        differences = {
+            key: (recorded.get(key), value)
+            for key, value in expected_architecture.items()
+            if recorded.get(key) != value
+        }
+        if differences:
+            raise ValueError(f"Teacher checkpoint architecture metadata mismatch: {differences}")
+    try:
+        model.encoder.load_state_dict(enc["encoder"], strict=True)
+        model.channel_encoder.load_state_dict(enc["channel_encoder"], strict=True)
+        model.channel_decoder.load_state_dict(dec["channel_decoder"], strict=True)
+        model.decoder.load_state_dict(dec["decoder"], strict=True)
+        model.dense.load_state_dict(dec["dense"], strict=True)
+    except RuntimeError as exc:
+        raise RuntimeError(
+            "Teacher checkpoint is incompatible with the configured architecture, "
+            "vocabulary size, or positional capacity"
+        ) from exc
+    model.requires_grad_(False)
+    model.eval()
+    return paths
+
+
+def configure_trainability(transmitter, teacher, student):
+    transmitter.requires_grad_(False)
+    teacher.requires_grad_(False)
+    student.requires_grad_(True)
+    transmitter.eval()
+    teacher.eval()
 
 
 def setup_seed(seed: int) -> None:
@@ -150,12 +236,12 @@ def validate_epoch(
                 noise_std
             )
 
-            t_logits, rx_ch_dec_out, rx_dec_out = teacher(
-                z_noisy=z_noisy, 
-                trg_inp=trg_inp, 
-                look_ahead_mask=look_ahead_mask,
-                src_mask=src_mask
-            )
+            use_kd = args.beta > 0 or args.gamma > 0
+            if use_kd:
+                t_logits, rx_ch_dec_out, rx_dec_out = teacher(
+                    z_noisy=z_noisy, trg_inp=trg_inp,
+                    look_ahead_mask=look_ahead_mask, src_mask=src_mask
+                )
 
             s_logits, s_ch_dec_out, s_dec_out = student(
                 z_noisy, 
@@ -179,9 +265,8 @@ def validate_epoch(
             #     criterion
             # )
 
-            kd = kd_kl_loss(s_logits, t_logits, trg_real, pad_idx, args.temperature)
-
-            src_valid = (src != pad_idx).float()
+            kd = (kd_kl_loss(s_logits, t_logits, trg_real, pad_idx, args.temperature)
+                  if args.beta > 0 else ce.new_zeros(()))
 
             # feat = feature_distillation_loss(
             #     student_feat=s_ch_dec_out, 
@@ -190,13 +275,10 @@ def validate_epoch(
             #     pad_idx=pad_idx,
             # )
 
-            feat = feature_distillation_loss_cosine_normalized(
-                student_feat=s_dec_out, 
-                teacher_feat=rx_dec_out.detach(), 
-                targets=trg_real,
-                pad_idx=pad_idx,
-                eps=1e-8
-            )
+            feat = (feature_distillation_loss_cosine_normalized(
+                student_feat=s_dec_out, teacher_feat=rx_dec_out.detach(),
+                targets=trg_real, pad_idx=pad_idx, eps=1e-8
+            ) if args.gamma > 0 else ce.new_zeros(()))
 
             weighted_ce = args.alpha * ce
             weighted_kd = args.beta * kd
@@ -297,12 +379,11 @@ def train(
                 noise_std
             )
             
-            t_logits, t_rx_ch, t_rx_dec = teacher(
-                z_noisy=z_noisy, 
-                trg_inp=trg_inp, 
-                look_ahead_mask=look_ahead_mask,
-                src_mask=src_mask
-            )
+            if args.beta > 0 or args.gamma > 0:
+                t_logits, t_rx_ch, t_rx_dec = teacher(
+                    z_noisy=z_noisy, trg_inp=trg_inp,
+                    look_ahead_mask=look_ahead_mask, src_mask=src_mask
+                )
 
         s_logits, s_rx_ch, s_dec_out = student(
             z_noisy, 
@@ -318,9 +399,8 @@ def train(
             label_smoothing=0.1,
         )
 
-        kd = kd_kl_loss(s_logits, t_logits, trg_real, pad_idx, args.temperature)
-
-        src_valid = (src != pad_idx).float()
+        kd = (kd_kl_loss(s_logits, t_logits, trg_real, pad_idx, args.temperature)
+              if args.beta > 0 else ce.new_zeros(()))
 
         # feat = feature_distillation_loss(
         #     student_feat=s_rx_ch,
@@ -329,13 +409,10 @@ def train(
         #     pad_idx=pad_idx,
         # )
 
-        feat = feature_distillation_loss_cosine_normalized(
-            student_feat=s_dec_out, 
-            teacher_feat=t_rx_dec.detach(), 
-            targets=trg_real,
-            pad_idx=pad_idx,
-            eps=1e-8
-        )
+        feat = (feature_distillation_loss_cosine_normalized(
+            student_feat=s_dec_out, teacher_feat=t_rx_dec.detach(),
+            targets=trg_real, pad_idx=pad_idx, eps=1e-8
+        ) if args.gamma > 0 else ce.new_zeros(()))
 
         weighted_ce = args.alpha * ce
         weighted_kd = args.beta * kd
@@ -383,10 +460,21 @@ def train(
 
 def main():
     args = parse_args()
+    model_type = validate_loss_configuration(
+        args.alpha, args.beta, args.gamma, args.temperature
+    )
+    if args.init_student_from_teacher:
+        raise ValueError(
+            "--init-student-from-teacher is not implemented; publication Students use fresh initialization"
+        )
     setup_seed(args.seed)
 
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     
+    data_dir, vocab_file, dataset_files = resolve_training_inputs(
+        args.data_dir, args.vocab_file, args.en
+    )
+    args.data_dir, args.vocab_file = str(data_dir), str(vocab_file)
     with open(args.vocab_file, "r", encoding="utf-8") as f:
         vocab = json.load(f)
     
@@ -398,9 +486,8 @@ def main():
     start_idx = token_to_idx["<START>"]
     end_idx = token_to_idx["<END>"]
 
-    train_set = EurParallelDatasetBPE(args.en, "train")
-    val_set = EurParallelDatasetBPE(args.en, "val")
-    test_set = EurParallelDatasetBPE(args.en, "test")
+    train_set = EurParallelDatasetBPE(args.en, "train", args.data_dir)
+    val_set = EurParallelDatasetBPE(args.en, "val", args.data_dir)
 
     # load dataset
     train_loader = DataLoader(
@@ -442,20 +529,14 @@ def main():
     #     args.dropout, 
     #     device
     # )
-    enc_model_path = os.path.join(args.teacher_checkpoint, 'encoder_26.pth')
-    dec_model_path = os.path.join(args.teacher_checkpoint, 'decoder_26.pth')
-
-    enc_checkpoint = torch.load(enc_model_path, map_location=device)
-    dec_checkpoint = torch.load(dec_model_path, map_location=device)
-
-    # Load the models
-    deepsc.encoder.load_state_dict(enc_checkpoint['encoder'])
-    deepsc.channel_encoder.load_state_dict(enc_checkpoint['channel_encoder'])
-    deepsc.channel_decoder.load_state_dict(dec_checkpoint['channel_decoder'])
-    deepsc.decoder.load_state_dict(dec_checkpoint['decoder'])
-    deepsc.dense.load_state_dict(dec_checkpoint['dense'])
-
-    deepsc.eval()
+    teacher_paths = load_teacher_checkpoints(
+        deepsc, args.teacher_encoder, args.teacher_decoder, device,
+        expected_architecture={
+            "num_layers": args.num_layers, "num_heads": args.num_heads,
+            "d_model": args.d_model, "dff": args.dff,
+            "max_len": args.max_len, "vocab_size": num_vocab,
+        },
+    )
     # encoder = deepsc.load_state_dict(torch.load(args.teacher_checkpoint, map_location=device))
     # deep_sc.load_state_dict(torch.load(args.teacher_checkpoint, map_location=device))
     # deep_sc.load_state_dict(torch.load('deepsc_12n.pth', map_location=device))
@@ -480,6 +561,7 @@ def main():
         args.dff, 
         args.dropout
     ).to(device)
+    configure_trainability(transmitter, receiver, student)
 
     noise_std = snr_to_noise(float(args.val_snr_db))
     # noise_std = np.random.uniform(
@@ -498,15 +580,36 @@ def main():
         )
     
     best_val = float("inf")
-
-    os.makedirs(args.save_dir, exist_ok=True)
-
-    today = date.today()
-    root_dir = args.save_dir + f'/one_student/{today.strftime("%Y-%m-%d")}'
-    
-    os.makedirs(root_dir, exist_ok=True)
-
-    csv_path = f"{root_dir}/results_{today.strftime('%Y-%m-%d')}.csv"
+    experiment_id = args.experiment_id or datetime.utcnow().strftime("student-%Y%m%dT%H%M%SZ")
+    root_dir = str(create_run_directory(args.save_dir, experiment_id))
+    csv_path = os.path.join(root_dir, "training.csv")
+    manifest_path = os.path.join(root_dir, "manifest.json")
+    manifest = base_training_manifest(
+        experiment_id=experiment_id, model_type=model_type, cli_args=vars(args)
+    )
+    manifest.update({
+        "architecture": {"teacher_layers": args.num_layers, "teacher_heads": args.num_heads,
+                         "student_layers": 4, "student_heads": 8, "d_model": args.d_model,
+                         "dff": args.dff, "max_length": args.max_len,
+                         "vocab_size": num_vocab, "student_initialization": "fresh seeded initialization"},
+        "dataset": {name: file_identity(path) for name, path in dataset_files.items()},
+        "tokenizer_vocab": file_identity(args.vocab_file),
+        "teacher_checkpoints": {"encoder": file_identity(teacher_paths[0]),
+                                "decoder": file_identity(teacher_paths[1])},
+        "seed": args.seed,
+        "channel": {"model": args.channel, "train_snr_mode": args.snr_mode,
+                    "train_snr_db": args.snr_db, "train_snr_db_low": args.snr_db_low,
+                    "train_snr_db_high": args.snr_db_high,
+                    "validation_snr_db": args.val_snr_db},
+        "optimizer": {"name": "Adam", "lr": args.lr, "betas": [0.9, 0.98],
+                      "eps": 1e-8, "weight_decay": args.weight_decay},
+        "loss": {"alpha": args.alpha, "beta": args.beta, "gamma": args.gamma,
+                 "temperature": args.temperature, "label_smoothing": 0.1,
+                 "feature_alignment": "normalized decoder cosine squared"},
+        "batch_size": args.batch_size, "epoch_budget": args.epochs,
+        "checkpoint_selection_rule": "minimum validation cross-entropy",
+    })
+    write_manifest(manifest_path, manifest)
 
     for epoch in range(args.epochs):
         start_time = time.time()
@@ -547,6 +650,9 @@ def main():
             "ce": train_stats["ce"],
             "kd": train_stats["kd"],
             "tf": train_stats["tf"],
+            "val_ce": val_stats["ce"],
+            "val_kd": val_stats["kd"],
+            "val_tf": val_stats["tf"],
             "ce_ppl": train_stats["ce_ppl"],
             "alpha": args.alpha,
             "beta": args.beta,
@@ -557,7 +663,7 @@ def main():
 
         save_epoch_results(
             csv_path=csv_path,
-            epoch=epoch + 1,
+            epoch=epoch,
             metrics=epoch_metrics,
         )
 
@@ -580,8 +686,8 @@ def main():
         )
 
         # save the best student model        
-        if val_stats["loss"] < best_val:
-            best_val = val_stats["loss"]
+        if val_stats["ce"] < best_val:
+            best_val = val_stats["ce"]
 
             best_path = os.path.join(
                 root_dir,
@@ -594,12 +700,17 @@ def main():
                 meta={
                     "epoch": epoch + 1,
                     "val_loss": val_stats["loss"],
+                    "val_ce": val_stats["ce"],
                     "temperature": args.temperature,
                     "alpha": args.alpha,
                     "beta": args.beta,
                     "gamma": args.gamma,
                     "channel": args.channel,
                 },
+            )
+            update_selected_checkpoint(
+                manifest_path, best_path, epoch + 1,
+                "validation_cross_entropy", best_val
             )
 
             print(f"  -> saved best student TR to: {best_path}")

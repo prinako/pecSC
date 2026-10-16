@@ -14,6 +14,7 @@ from torch.utils.data import DataLoader
 import numpy as np
 from tqdm import tqdm
 from datetime import date
+from datetime import datetime
 
 from dataset_multilingual import EurParallelDatasetBPE, collate_parallelBPE
 from models.transceiver import DeepSC
@@ -28,6 +29,11 @@ from utils.train_utils import (
     val_step, 
     train_mi,
 )
+from utils.experiment_manifest import (
+    base_training_manifest, create_run_directory, file_identity,
+    update_selected_checkpoint, write_manifest,
+)
+from utils.publication_data import resolve_training_inputs
 
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
@@ -39,7 +45,7 @@ def setup_seed(seed):
     torch.backends.cudnn.deterministic = True
 
 def validate(epoch, args, pad_idx, criterion, net):
-    val_eur = EurParallelDatasetBPE(args.en, 'val')
+    val_eur = EurParallelDatasetBPE(args.en, 'val', args.data_dir)
     
     val_iterator = DataLoader(
         val_eur,
@@ -119,7 +125,7 @@ def validate(epoch, args, pad_idx, criterion, net):
 
 
 def train(epoch, args, pad_idx, optimizer, criterion, net)->float:
-    train_eur= EurParallelDatasetBPE(args.en, 'train')
+    train_eur= EurParallelDatasetBPE(args.en, 'train', args.data_dir)
     
     train_iterator = DataLoader(
         train_eur,
@@ -209,7 +215,7 @@ def train(epoch, args, pad_idx, optimizer, criterion, net)->float:
         "snr_max": float(np.max(snr_values)),
     }
 
-def save_model(net: DeepSC, root_dir: str, epoch: int):
+def save_model(net: DeepSC, root_dir: str, epoch: int, metadata=None):
     encoder_state_dict = {
         "encoder": net.encoder.state_dict(),
         "channel_encoder": net.channel_encoder.state_dict(),
@@ -219,19 +225,27 @@ def save_model(net: DeepSC, root_dir: str, epoch: int):
         "decoder": net.decoder.state_dict(),
         "dense": net.dense.state_dict(),
     }
+    if metadata is not None:
+        encoder_state_dict["meta"] = metadata
+        decoder_state_dict["meta"] = metadata
     encode_path = root_dir + '/encoder_{}.pth'.format(str(epoch + 1).zfill(2))
     decode_path = root_dir + '/decoder_{}.pth'.format(str(epoch + 1).zfill(2))
     with open(encode_path, 'wb') as f:
         torch.save(encoder_state_dict, f)
     with open(decode_path, 'wb') as f:
         torch.save(decoder_state_dict, f)
+    return encode_path, decode_path
 
 def main():
-    setup_seed(42)
     parser = argparse.ArgumentParser()
-    #parser.add_argument('--data-dir', default='data/train_data.pkl', type=str)
-    parser.add_argument('--vocab-file', default='europarl_bpe/vocab_bpe.json', type=str)
+    parser.add_argument('--data-dir', required=True, type=str,
+                        help='Explicit directory containing train_en_en.pkl and val_en_en.pkl')
+    parser.add_argument('--vocab-file', default='vocab_bpe.json', type=str,
+                        help='Absolute path or path relative to --data-dir')
     parser.add_argument('--checkpoint-path', default='checkpoints/deepsc-Rayleigh/multilingual_bpe', type=str)
+    parser.add_argument('--experiment-id', type=str,
+                        help='Unique run directory name (default: generated UTC timestamp)')
+    parser.add_argument('--seed', default=42, type=int)
     # channel
     parser.add_argument("--channel", type=str, default="Rayleigh", choices=["AWGN", "Rayleigh", "Rician"])
     parser.add_argument("--snr-mode", type=str, default="range", choices=["fixed", "range"])
@@ -260,8 +274,12 @@ def main():
     parser.add_argument('--pt-fr', default='pt_fr', type=str)
 
     args = parser.parse_args()
-
-    args.vocab_file = './data/train/' + args.vocab_file
+    setup_seed(args.seed)
+    data_dir, vocab_file, dataset_files = resolve_training_inputs(
+        args.data_dir, args.vocab_file, args.en
+    )
+    args.data_dir = str(data_dir)
+    args.vocab_file = str(vocab_file)
 
     """ preparing the dataset """
     vocab = json.load(open(args.vocab_file, 'rb'))
@@ -298,18 +316,34 @@ def main():
     #opt = NoamOpt(args.d_model, 1, 4000, optimizer)
 
     today = date.today()
-    
-    root_dir = args.checkpoint_path + '/' + today.strftime("%Y-%m-%d")
+    experiment_id = args.experiment_id or datetime.utcnow().strftime("teacher-%Y%m%dT%H%M%SZ")
+    root_dir = str(create_run_directory(args.checkpoint_path, experiment_id))
+    manifest_path = os.path.join(root_dir, "manifest.json")
+    manifest = base_training_manifest(
+        experiment_id=experiment_id, model_type="Teacher", cli_args=vars(args)
+    )
+    manifest.update({
+        "architecture": {"layers": args.num_layers, "heads": args.num_heads,
+                         "d_model": args.d_model, "dff": args.dff,
+                         "max_length": args.MAX_LENGTH, "vocab_size": num_vocab},
+        "dataset": {name: file_identity(path) for name, path in dataset_files.items()},
+        "tokenizer_vocab": file_identity(args.vocab_file),
+        "seed": args.seed,
+        "channel": {"model": args.channel, "train_snr_mode": args.snr_mode,
+                    "train_snr_db": args.snr_db, "train_snr_db_low": args.snr_db_low,
+                    "train_snr_db_high": args.snr_db_high,
+                    "validation_snr_db": args.val_snr_db},
+        "optimizer": {"name": "Adam", "lr": 1e-4, "betas": [0.9, 0.98],
+                      "eps": 1e-8, "weight_decay": 5e-4},
+        "batch_size": args.batch_size, "epoch_budget": args.epochs,
+        "checkpoint_selection_rule": "minimum validation cross-entropy",
+    })
+    write_manifest(manifest_path, manifest)
 
     initNetParams(deepsc) # init net parameters
 
     best_val_loss = float("inf")
 
-    if not os.path.exists(root_dir):
-            os.makedirs(root_dir)
-
-    
-    
     for epoch in range(args.epochs):
         start = time.time()
         
@@ -344,13 +378,34 @@ def main():
         )
         
         if val_stats["ce"] < best_val_loss:
-            save_model(
+            encoder_path, decoder_path = save_model(
                 deepsc,
                 root_dir,
-                epoch
+                epoch,
+                metadata={
+                    "experiment_id": experiment_id,
+                    "epoch": epoch + 1,
+                    "architecture": {
+                        "num_layers": args.num_layers, "num_heads": args.num_heads,
+                        "d_model": args.d_model, "dff": args.dff,
+                        "max_len": args.MAX_LENGTH, "vocab_size": num_vocab,
+                    },
+                },
             )
-
             best_val_loss = val_stats["ce"]
+            # The decoder identity is recorded here; both paired paths and hashes
+            # remain in the manifest for unambiguous Teacher reconstruction.
+            update_selected_checkpoint(
+                manifest_path, decoder_path, epoch + 1,
+                "validation_cross_entropy", best_val_loss
+            )
+            payload = json.load(open(manifest_path, encoding="utf-8"))
+            payload["selected_checkpoint"]["encoder"] = file_identity(encoder_path)
+            tmp = manifest_path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as handle:
+                json.dump(payload, handle, indent=2, sort_keys=True)
+                handle.write("\n")
+            os.replace(tmp, manifest_path)
         
     # record_loss = []
 
