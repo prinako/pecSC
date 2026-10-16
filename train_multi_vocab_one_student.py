@@ -45,6 +45,10 @@ from utils.experiment_manifest import (
 from utils.publication_data import resolve_training_inputs
 
 
+STUDENT_NUM_LAYERS = 4
+STUDENT_NUM_HEADS = 8
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Receiver-only KD for DeepSC")
 
@@ -182,6 +186,21 @@ def configure_trainability(transmitter, teacher, student):
     student.requires_grad_(True)
     transmitter.eval()
     teacher.eval()
+
+
+def build_student_receiver(num_vocab, args, device):
+    """Build the single compact receiver architecture used by CE and KD."""
+    return Student(
+        STUDENT_NUM_LAYERS,
+        num_vocab,
+        num_vocab,
+        args.max_len,
+        args.max_len,
+        args.d_model,
+        STUDENT_NUM_HEADS,
+        args.dff,
+        args.dropout,
+    ).to(device)
 
 
 def setup_seed(seed: int) -> None:
@@ -472,7 +491,7 @@ def main():
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     
     data_dir, vocab_file, dataset_files = resolve_training_inputs(
-        args.data_dir, args.vocab_file, args.en
+        args.data_dir, args.vocab_file, args.en, args.max_len
     )
     args.data_dir, args.vocab_file = str(data_dir), str(vocab_file)
     with open(args.vocab_file, "r", encoding="utf-8") as f:
@@ -550,17 +569,7 @@ def main():
         dense=deepsc.dense
     )
 
-    student= Student(
-        4, 
-        num_vocab, 
-        num_vocab, 
-        args.max_len, 
-        args.max_len,
-        args.d_model, 
-        8, 
-        args.dff, 
-        args.dropout
-    ).to(device)
+    student = build_student_receiver(num_vocab, args, device)
     configure_trainability(transmitter, receiver, student)
 
     noise_std = snr_to_noise(float(args.val_snr_db))
@@ -589,7 +598,8 @@ def main():
     )
     manifest.update({
         "architecture": {"teacher_layers": args.num_layers, "teacher_heads": args.num_heads,
-                         "student_layers": 4, "student_heads": 8, "d_model": args.d_model,
+                         "student_layers": STUDENT_NUM_LAYERS,
+                         "student_heads": STUDENT_NUM_HEADS, "d_model": args.d_model,
                          "dff": args.dff, "max_length": args.max_len,
                          "vocab_size": num_vocab, "student_initialization": "fresh seeded initialization"},
         "dataset": {name: file_identity(path) for name, path in dataset_files.items()},

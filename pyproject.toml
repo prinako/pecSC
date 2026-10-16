@@ -22,3 +22,11 @@ dependencies = [
     "tqdm>=4.67.3",
     "w3lib>=2.4.0",
 ]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3.0",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]

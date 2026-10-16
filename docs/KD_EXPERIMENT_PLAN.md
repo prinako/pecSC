@@ -20,6 +20,7 @@ An external published-method baseline (e.g., a carefully adapted KD-SemCom confi
 - [x] Standardize non-overwriting run directories and run manifests, including source/data/checkpoint hashes, git identity, CLI/configuration, runtime, hardware, seed, optimizer, SNR, selection rule and selected checkpoint.
 - [x] Add the validation-only evaluation schema/layout and grouped corpus-BLEU aggregation.
 - [x] Make validation cross-entropy the common CE-only/KD Student checkpoint-selection rule.
+- [x] Verify manifest hashes and sizes before training; validate the SentencePiece/vocabulary mapping, special-token IDs, 70/15/15 ratios, split-ID disjointness/counts, train/validation encoded overlap, accepted counts, token ranges, EN framing and positional capacity.
 
 The remaining unchecked dataset item requires running preprocessing on the actual
 Europarl JSON source and reviewing the resulting counts and hashes. No full
@@ -27,7 +28,7 @@ training or held-out test evaluation was performed during Stage 1 implementation
 
 ## Stage 2 — Training
 - [ ] Fresh Teacher training; select checkpoint on validation CE.
-- [ ] Define one **comparable validation selection rule** for CE-only and KD Students.
+- [x] Define one **comparable validation selection rule** for CE-only and KD Students: minimum validation cross-entropy.
 - [ ] Train CE-only (alpha=1, beta=0, gamma=0) and KD (candidate 0.6/0.3/0.1, T=2) with matched architecture/initialization/optimizer/budget/channel.
 - [ ] Collect training and validation loss breakdown, checkpoint identity and logs.
 
@@ -44,14 +45,49 @@ training or held-out test evaluation was performed during Stage 1 implementation
 - [ ] Record source revision, dataset/tokenizer/checkpoint hashes and exact reproduction commands.
 - [ ] Do not import old 90/10 checkpoint results, or claim model compression from decoder layer counts alone.
 
-## Existing implementation requiring audit
-- `main_multi_vocab.py` — Teacher trainer; verify dataset root and run identity.
-- `train_multi_vocab_one_student.py` — authoritative receiver-only KD; hardcoded Teacher paths and test-set loader need fixing.
-- `data_perprocess/preprocess_text_mu_bpe.py` — split ratio/duplicates/dated outputs.
-- `dataset_multilingual.py` — dataset root currently defaults to an undated path.
-- `metrics/metrics_bpe.py` — corpus-level aggregation needs correct grouped handling.
+## Stage 1 verification status (2026-10-16)
 
-**Status:** Branch/setup only. No training, metrics or benchmark runs performed by this preparation step.
+Implemented and verified:
+
+- The preprocessing CLI completed on a synthetic English dataset and produced
+  train/validation/test pickles, a fresh train-only SentencePiece model,
+  vocabulary JSON, split IDs and a dataset manifest.
+- Training input resolution rejects changed hashes/sizes, tokenizer/vocabulary
+  mismatches, incorrect special IDs, non-70/15/15 manifests, stale/reused
+  tokenizers, overlapping IDs/content, invalid EN pairs, invalid token IDs and
+  model/dataset positional-capacity mismatches.
+- Training validation opens only the train and validation pickle payloads. The
+  held-out test pickle is not required or opened by either training entry point;
+  its payload/hash must be verified by the future evaluation entry point.
+- A Teacher saved with the real split-checkpoint format round-trips exactly;
+  architecture metadata and tensor incompatibilities are rejected. The loaded
+  Teacher/transmitter remain frozen and the compact Student completes a forward
+  pass using its transmitted representation.
+- CE-only and KD use the same centralized four-layer/eight-head Student
+  constructor and reproduce identical initial weights from the same seed. A
+  synthetic CE training batch and CE/KD validation pass completed. CE-only did
+  not call the Teacher receiver and reported zero KD/feature contribution. The
+  normalized decoder-feature loss was checked against `(1-cosine)^2` with PAD
+  masking.
+- `uv sync`, `uv run pytest -q` (**26 passed**), compileall, and both training
+  CLI help commands passed. No tests failed or were skipped in the final run.
+
+Still required or deliberately blocked:
+
+- Run preprocessing on the actual Europarl source, then review the real source
+  hashes, accepted counts, vocabulary size, special IDs, overlap statistics and
+  sequence lengths in `dataset_manifest.json`.
+- Verify the held-out test pickle hash only in the future evaluation workflow;
+  do not expose its contents during training/model selection.
+- Freeze the publication corpus release/path, vocabulary size, Teacher epoch
+  budget, and repeated-run seed policy before starting the real Teacher.
+- Full Teacher/Student GPU training, final-test evaluation, latency and quality
+  measurements remain unrun. No publication results are implied by these smoke
+  tests.
+
+**Status:** Stage 1 code and synthetic pipeline are verified and ready for real
+dataset preprocessing. Real dataset acceptance is the remaining gate before
+Teacher training.
 
 ## Reproduction command templates
 
