@@ -285,11 +285,20 @@ class SeqtoText:
 
 class Channels():
 
-    def AWGN(self, Tx_sig, n_var):
+    def AWGN(self, Tx_sig, n_var, return_metadata=False):
         Rx_sig = Tx_sig + torch.normal(0, n_var, size=Tx_sig.shape).to(device)
+        if return_metadata:
+            return Rx_sig, {
+                "channel": "AWGN",
+                "rayleigh_real": None,
+                "rayleigh_imag": None,
+                "rayleigh_magnitude": None,
+                "theoretical_noise_amplification": 1.0,
+                "theoretical_noise_power_amplification": 1.0,
+            }
         return Rx_sig
 
-    def Rayleigh(self, Tx_sig, n_var):
+    def Rayleigh(self, Tx_sig, n_var, return_metadata=False):
         shape = Tx_sig.shape
         H_real = torch.normal(0, math.sqrt(1/2), size=[1]).to(device)
         H_imag = torch.normal(0, math.sqrt(1/2), size=[1]).to(device)
@@ -299,9 +308,24 @@ class Channels():
         # Channel estimation
         Rx_sig = torch.matmul(Rx_sig, torch.inverse(H)).view(shape)
 
+        if return_metadata:
+            # These values describe the coefficient already sampled above.  No
+            # additional random draw is made for diagnostics.
+            magnitude = torch.sqrt(H_real.square() + H_imag.square())
+            amplitude_gain = magnitude.reciprocal()
+            return Rx_sig, {
+                "channel": "Rayleigh",
+                "rayleigh_real": float(H_real.detach().item()),
+                "rayleigh_imag": float(H_imag.detach().item()),
+                "rayleigh_magnitude": float(magnitude.detach().item()),
+                "theoretical_noise_amplification": float(amplitude_gain.detach().item()),
+                "theoretical_noise_power_amplification": float(
+                    amplitude_gain.square().detach().item()
+                ),
+            }
         return Rx_sig
 
-    def Rician(self, Tx_sig, n_var, K=1):
+    def Rician(self, Tx_sig, n_var, K=1, return_metadata=False):
         shape = Tx_sig.shape
         mean = math.sqrt(K / (K + 1))
         std = math.sqrt(1 / (K + 1))
@@ -313,6 +337,19 @@ class Channels():
         # Channel estimation
         Rx_sig = torch.matmul(Rx_sig, torch.inverse(H)).view(shape)
 
+        if return_metadata:
+            magnitude = torch.sqrt(H_real.square() + H_imag.square())
+            amplitude_gain = magnitude.reciprocal()
+            return Rx_sig, {
+                "channel": "Rician",
+                "rayleigh_real": None,
+                "rayleigh_imag": None,
+                "rayleigh_magnitude": None,
+                "theoretical_noise_amplification": float(amplitude_gain.detach().item()),
+                "theoretical_noise_power_amplification": float(
+                    amplitude_gain.square().detach().item()
+                ),
+            }
         return Rx_sig
 
 def text_to_indices(text, token_to_idx, start_idx, end_idx, pad_idx, max_length, lang_token="<EN>"):
@@ -703,4 +740,3 @@ def save_epoch_results(csv_path, epoch, metrics):
             writer.writeheader()
 
         writer.writerow(row)
-
