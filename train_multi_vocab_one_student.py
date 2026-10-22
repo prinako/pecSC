@@ -9,10 +9,13 @@ from dataset import EurDataset, collate_data
 
 from datetime import datetime
 import argparse
+import csv
 import json
+import math
 import os
 import random
 import time
+import warnings
 import numpy as np
 
 from models.transceiver import DeepSC
@@ -99,6 +102,14 @@ def parse_args():
     parser.add_argument("--snr-db-low", type=float, default=2.0)
     parser.add_argument("--snr-db-high", type=float, default=18.0)
     parser.add_argument("--val-snr-db", type=float, default=8.0)
+    parser.add_argument(
+        "--diagnostic-mode",
+        action="store_true",
+        help=(
+            "Write per-training-batch channel and numerical diagnostics to "
+            "diagnostics.csv in this run's new experiment directory"
+        ),
+    )
 
     # KD
     parser.add_argument("--temperature", type=float, default=2.0)
@@ -210,6 +221,131 @@ def setup_seed(seed: int) -> None:
     random.seed(seed)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
+
+
+DIAGNOSTIC_FIELDS = [
+    "epoch", "batch_index", "channel", "snr_db", "noise_std",
+    "rayleigh_real", "rayleigh_imag", "rayleigh_magnitude",
+    "theoretical_noise_amplification",
+    "theoretical_noise_power_amplification", "ce", "loss",
+    "gradient_norm_before_clipping", "parameter_norm",
+    "max_received_signal_magnitude", "has_nan", "has_inf",
+    "nonfinite_components",
+]
+
+
+class DiagnosticCSVLogger:
+    """Append-only per-batch diagnostics for one newly created run directory."""
+
+    def __init__(self, path):
+        self.path = os.fspath(path)
+        if os.path.exists(self.path):
+            raise FileExistsError(f"Refusing to overwrite diagnostic file: {self.path}")
+        with open(self.path, "x", newline="", encoding="utf-8") as handle:
+            csv.DictWriter(handle, fieldnames=DIAGNOSTIC_FIELDS).writeheader()
+
+    def write(self, row):
+        with open(self.path, "a", newline="", encoding="utf-8") as handle:
+            csv.DictWriter(handle, fieldnames=DIAGNOSTIC_FIELDS).writerow(row)
+
+
+def _tensor_nonfinite_kind(value):
+    if value is None:
+        return False, False
+    tensor = value.detach() if isinstance(value, torch.Tensor) else torch.as_tensor(value)
+    return bool(torch.isnan(tensor).any().item()), bool(torch.isinf(tensor).any().item())
+
+
+def _parameter_l2_norm(parameters):
+    norms = [torch.linalg.vector_norm(parameter.detach()) for parameter in parameters]
+    if not norms:
+        return 0.0
+    return float(torch.linalg.vector_norm(torch.stack(norms)).item())
+
+
+def _gradient_l2_norm(parameters):
+    norms = [
+        torch.linalg.vector_norm(parameter.grad.detach())
+        for parameter in parameters if parameter.grad is not None
+    ]
+    if not norms:
+        return 0.0
+    return float(torch.linalg.vector_norm(torch.stack(norms)).item())
+
+
+def _diagnostic_row(
+    *, epoch, batch_index, channel, snr_db, noise_std, channel_metadata,
+    ce, loss, gradient_norm, parameter_norm, z_noisy, student,
+):
+    components = {
+        "ce": ce,
+        "loss": loss,
+        "received_signal": z_noisy,
+        "gradients": [p.grad for p in student.parameters() if p.grad is not None],
+        "parameters": list(student.parameters()),
+    }
+    has_nan = False
+    has_inf = False
+    nonfinite_components = []
+    for name, values in components.items():
+        values = values if isinstance(values, list) else [values]
+        component_nan = component_inf = False
+        for value in values:
+            value_nan, value_inf = _tensor_nonfinite_kind(value)
+            component_nan = component_nan or value_nan
+            component_inf = component_inf or value_inf
+        if component_nan or component_inf:
+            nonfinite_components.append(name)
+        has_nan = has_nan or component_nan
+        has_inf = has_inf or component_inf
+
+    row = {
+        "epoch": epoch + 1,
+        "batch_index": batch_index + 1,
+        "channel": channel,
+        "snr_db": float(snr_db),
+        "noise_std": float(noise_std),
+        "rayleigh_real": channel_metadata.get("rayleigh_real"),
+        "rayleigh_imag": channel_metadata.get("rayleigh_imag"),
+        "rayleigh_magnitude": channel_metadata.get("rayleigh_magnitude"),
+        "theoretical_noise_amplification": channel_metadata[
+            "theoretical_noise_amplification"
+        ],
+        "theoretical_noise_power_amplification": channel_metadata[
+            "theoretical_noise_power_amplification"
+        ],
+        "ce": float(ce.detach().item()),
+        "loss": float(loss.detach().item()),
+        "gradient_norm_before_clipping": float(gradient_norm),
+        "parameter_norm": float(parameter_norm),
+        "max_received_signal_magnitude": float(z_noisy.detach().abs().max().item()),
+        "has_nan": has_nan,
+        "has_inf": has_inf,
+        "nonfinite_components": ";".join(nonfinite_components),
+    }
+    scalar_values = [
+        row["snr_db"], row["noise_std"], row["ce"], row["loss"],
+        row["gradient_norm_before_clipping"], row["parameter_norm"],
+        row["max_received_signal_magnitude"],
+        row["theoretical_noise_amplification"],
+        row["theoretical_noise_power_amplification"],
+    ]
+    for value in (row["rayleigh_real"], row["rayleigh_imag"], row["rayleigh_magnitude"]):
+        if value is not None:
+            scalar_values.append(value)
+    row["has_nan"] = row["has_nan"] or any(math.isnan(value) for value in scalar_values)
+    row["has_inf"] = row["has_inf"] or any(math.isinf(value) for value in scalar_values)
+    if row["has_nan"] or row["has_inf"]:
+        warnings.warn(
+            "Non-finite diagnostic at epoch "
+            f"{row['epoch']}, batch {row['batch_index']}: "
+            f"components={row['nonfinite_components'] or 'derived scalar metrics'}, "
+            f"CE={row['ce']}, grad_norm={row['gradient_norm_before_clipping']}, "
+            f"|h|={row['rayleigh_magnitude']}",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+    return row
 
 @torch.no_grad()
 def validate_epoch(
@@ -342,7 +478,8 @@ def train(
     device: torch.device,
     criterion,
     epoch,
-    args
+    args,
+    diagnostic_logger=None,
     ):
 
     for p in teacher.parameters():
@@ -366,7 +503,7 @@ def train(
 
     pbar = tqdm(train_loader)
 
-    for src, trg in pbar:
+    for batch_index, (src, trg) in enumerate(pbar):
         # print(batch.shape)
         src = src.to(device)
         trg = trg.to(device)
@@ -391,12 +528,18 @@ def train(
         noise_std = snr_to_noise(snr_db)
 
         with torch.no_grad():
-            _, _, _, z_noisy = transmitter(
-                src, 
-                src_mask, 
-                channel, 
-                noise_std
+            tx_result = transmitter(
+                src,
+                src_mask,
+                channel,
+                noise_std,
+                return_channel_metadata=diagnostic_logger is not None,
             )
+            if diagnostic_logger is None:
+                _, _, _, z_noisy = tx_result
+                channel_metadata = None
+            else:
+                _, _, _, z_noisy, channel_metadata = tx_result
             
             if args.beta > 0 or args.gamma > 0:
                 t_logits, t_rx_ch, t_rx_dec = teacher(
@@ -442,7 +585,25 @@ def train(
         # loss = (args.alpha * ce) + (args.beta * kd) + args.gamma * feat
 
         loss.backward()
-        
+
+        if diagnostic_logger is not None:
+            gradient_norm = _gradient_l2_norm(student.parameters())
+            parameter_norm = _parameter_l2_norm(student.parameters())
+            diagnostic_logger.write(_diagnostic_row(
+                epoch=epoch,
+                batch_index=batch_index,
+                channel=channel,
+                snr_db=snr_db,
+                noise_std=noise_std,
+                channel_metadata=channel_metadata,
+                ce=ce,
+                loss=loss,
+                gradient_norm=gradient_norm,
+                parameter_norm=parameter_norm,
+                z_noisy=z_noisy,
+                student=student,
+            ))
+
         if args.grad_clip is not None and args.grad_clip > 0:
             torch.nn.utils.clip_grad_norm_(student.parameters(), args.grad_clip)
             # torch.nn.utils.clip_grad_norm_(student_2.parameters(), args.grad_clip)
@@ -593,6 +754,10 @@ def main():
     root_dir = str(create_run_directory(args.save_dir, experiment_id))
     csv_path = os.path.join(root_dir, "training.csv")
     manifest_path = os.path.join(root_dir, "manifest.json")
+    diagnostic_logger = (
+        DiagnosticCSVLogger(os.path.join(root_dir, "diagnostics.csv"))
+        if args.diagnostic_mode else None
+    )
     manifest = base_training_manifest(
         experiment_id=experiment_id, model_type=model_type, cli_args=vars(args)
     )
@@ -618,6 +783,12 @@ def main():
                  "feature_alignment": "normalized decoder cosine squared"},
         "batch_size": args.batch_size, "epoch_budget": args.epochs,
         "checkpoint_selection_rule": "minimum validation cross-entropy",
+        "diagnostics": {
+            "enabled": args.diagnostic_mode,
+            "file": "diagnostics.csv" if args.diagnostic_mode else None,
+            "batch_indices": "one-based",
+            "noise_amplification": "1 / |h| (amplitude/std); power column is 1 / |h|^2",
+        },
     })
     write_manifest(manifest_path, manifest)
 
@@ -635,7 +806,8 @@ def main():
             channel=args.channel,
             criterion=criterion,
             epoch=epoch,
-            args=args
+            args=args,
+            diagnostic_logger=diagnostic_logger,
         )
 
         val_stats = validate_epoch(
