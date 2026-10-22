@@ -286,7 +286,7 @@ class SeqtoText:
 class Channels():
 
     def AWGN(self, Tx_sig, n_var, return_metadata=False):
-        Rx_sig = Tx_sig + torch.normal(0, n_var, size=Tx_sig.shape).to(device)
+        Rx_sig = Tx_sig + torch.normal(0, n_var, size=Tx_sig.shape).to(Tx_sig.device)
         if return_metadata:
             return Rx_sig, {
                 "channel": "AWGN",
@@ -300,9 +300,9 @@ class Channels():
 
     def Rayleigh(self, Tx_sig, n_var, return_metadata=False):
         shape = Tx_sig.shape
-        H_real = torch.normal(0, math.sqrt(1/2), size=[1]).to(device)
-        H_imag = torch.normal(0, math.sqrt(1/2), size=[1]).to(device)
-        H = torch.Tensor([[H_real, -H_imag], [H_imag, H_real]]).to(device)
+        H_real = torch.normal(0, math.sqrt(1/2), size=[1]).to(Tx_sig.device)
+        H_imag = torch.normal(0, math.sqrt(1/2), size=[1]).to(Tx_sig.device)
+        H = torch.Tensor([[H_real, -H_imag], [H_imag, H_real]]).to(Tx_sig.device)
         Tx_sig = torch.matmul(Tx_sig.view(shape[0], -1, 2), H)
         Rx_sig = self.AWGN(Tx_sig, n_var)
         # Channel estimation
@@ -329,9 +329,9 @@ class Channels():
         shape = Tx_sig.shape
         mean = math.sqrt(K / (K + 1))
         std = math.sqrt(1 / (K + 1))
-        H_real = torch.normal(mean, std, size=[1]).to(device)
-        H_imag = torch.normal(mean, std, size=[1]).to(device)
-        H = torch.Tensor([[H_real, -H_imag], [H_imag, H_real]]).to(device)
+        H_real = torch.normal(mean, std, size=[1]).to(Tx_sig.device)
+        H_imag = torch.normal(mean, std, size=[1]).to(Tx_sig.device)
+        H = torch.Tensor([[H_real, -H_imag], [H_imag, H_real]]).to(Tx_sig.device)
         Tx_sig = torch.matmul(Tx_sig.view(shape[0], -1, 2), H)
         Rx_sig = self.AWGN(Tx_sig, n_var)
         # Channel estimation
@@ -402,7 +402,7 @@ def create_masks(src, trg, padding_idx):
     look_ahead_mask = subsequent_mask(trg.size(-1)).type_as(trg_mask.data)
     combined_mask = torch.max(trg_mask, look_ahead_mask)
     
-    return src_mask.to(device), combined_mask.to(device)
+    return src_mask.to(src.device), combined_mask.to(trg.device)
 
 
 
