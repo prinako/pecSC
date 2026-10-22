@@ -22,7 +22,8 @@ class Transmitter(nn.Module):
         src: torch.Tensor, 
         src_mask: torch.Tensor, 
         channel_type: str, 
-        noise_std: float
+        noise_std: float,
+        return_channel_metadata: bool = False,
     ) -> torch.Tensor:
         """
         Forward pass through the transmitter model.
@@ -39,10 +40,24 @@ class Transmitter(nn.Module):
         en_out = self.encoder(src, src_mask)
         ch_en_out = self.channel_encoder(en_out)
         Tx_sig = power_normalize(ch_en_out)
-        z_noisy = self.apply_channel(Tx_sig, channel_type=channel_type, noise_std=noise_std)
-        return en_out, ch_en_out, Tx_sig, z_noisy
+        channel_result = self.apply_channel(
+            Tx_sig,
+            channel_type=channel_type,
+            noise_std=noise_std,
+            return_metadata=return_channel_metadata,
+        )
+        if return_channel_metadata:
+            z_noisy, channel_metadata = channel_result
+            return en_out, ch_en_out, Tx_sig, z_noisy, channel_metadata
+        return en_out, ch_en_out, Tx_sig, channel_result
     
-    def apply_channel(self, Tx_sig: torch.Tensor, channel_type: str, noise_std: float) -> torch.Tensor:
+    def apply_channel(
+        self,
+        Tx_sig: torch.Tensor,
+        channel_type: str,
+        noise_std: float,
+        return_metadata: bool = False,
+    ) -> torch.Tensor:
         """
         Apply a channel to the transmitted signal.
         
@@ -56,11 +71,17 @@ class Transmitter(nn.Module):
         """
         channels = Channels()
         if channel_type == 'AWGN':
-            z_noisy = channels.AWGN(Tx_sig, noise_std)
+            z_noisy = channels.AWGN(
+                Tx_sig, noise_std, return_metadata=return_metadata
+            )
         elif channel_type == 'Rayleigh':
-            z_noisy = channels.Rayleigh(Tx_sig, noise_std)
+            z_noisy = channels.Rayleigh(
+                Tx_sig, noise_std, return_metadata=return_metadata
+            )
         elif channel_type == 'Rician':
-            z_noisy = channels.Rician(Tx_sig, noise_std)
+            z_noisy = channels.Rician(
+                Tx_sig, noise_std, return_metadata=return_metadata
+            )
         else:
             raise ValueError("Please choose from AWGN, Rayleigh, and Rician")
         return z_noisy
