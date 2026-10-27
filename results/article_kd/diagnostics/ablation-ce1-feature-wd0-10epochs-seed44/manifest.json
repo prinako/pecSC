@@ -1,0 +1,158 @@
+{
+  "architecture": {
+    "d_model": 128,
+    "dff": 512,
+    "max_length": 67,
+    "student_heads": 8,
+    "student_initialization": "fresh seeded initialization",
+    "student_layers": 4,
+    "teacher_heads": 16,
+    "teacher_layers": 8,
+    "vocab_size": 32000
+  },
+  "batch_size": 32,
+  "channel": {
+    "model": "Rayleigh",
+    "train_snr_db": 8.0,
+    "train_snr_db_high": 20.0,
+    "train_snr_db_low": 0.0,
+    "train_snr_mode": "range",
+    "validation_snr_db": 8.0
+  },
+  "checkpoint_selection_rule": "minimum validation cross-entropy",
+  "cli_arguments": {
+    "alpha": 1.0,
+    "batch_size": 32,
+    "beta": 0.0,
+    "channel": "Rayleigh",
+    "d_model": 128,
+    "data_dir": "/home/prinako/dev/BPE/pecSC/data/train/europarl_bpe/2026-publication-v1",
+    "dff": 512,
+    "diagnostic_mode": true,
+    "dropout": 0.1,
+    "en": "en_en",
+    "en_es": "en_es",
+    "en_fr": "en_fr",
+    "en_pt": "en_pt",
+    "epochs": 10,
+    "experiment_id": "ablation-ce1-feature-wd0-10epochs-seed44",
+    "gamma": 0.1,
+    "grad_clip": 1.0,
+    "init_student_from_teacher": false,
+    "lr": 0.0001,
+    "max_len": 67,
+    "num_heads": 16,
+    "num_layers": 8,
+    "num_workers": 0,
+    "pt": "pt_pt",
+    "pt_es": "pt_es",
+    "pt_fr": "pt_fr",
+    "pt_pt": "pt_en",
+    "save_dir": "results/article_kd/diagnostics",
+    "seed": 44,
+    "snr_db": 8.0,
+    "snr_db_high": 20.0,
+    "snr_db_low": 0.0,
+    "snr_mode": "range",
+    "teacher_decoder": "results/article_kd/training/teacher-bpe32k-seed42/decoder_38.pth",
+    "teacher_encoder": "results/article_kd/training/teacher-bpe32k-seed42/encoder_38.pth",
+    "temperature": 2.0,
+    "val_snr_db": 8.0,
+    "vocab_file": "/home/prinako/dev/BPE/pecSC/data/train/europarl_bpe/2026-publication-v1/vocab_bpe.json",
+    "weight_decay": 0.0
+  },
+  "created_utc": "2026-10-25T18:46:27.230311+00:00",
+  "dataset": {
+    "dataset_manifest": {
+      "path": "/home/prinako/dev/BPE/pecSC/data/train/europarl_bpe/2026-publication-v1/dataset_manifest.json",
+      "sha256": "07b3275d48f5535fe94bf42e268f1a6884fd5048e9b9e1326c11aadaff8ae2d0",
+      "size_bytes": 4159
+    },
+    "split_ids": {
+      "path": "/home/prinako/dev/BPE/pecSC/data/train/europarl_bpe/2026-publication-v1/split_ids.json",
+      "sha256": "e4e63ad6241e3c4b103aea227854f8dbb04bcd54dba6043ffe4662851a23faf8",
+      "size_bytes": 18996027
+    },
+    "tokenizer_model": {
+      "path": "/home/prinako/dev/BPE/pecSC/data/train/europarl_bpe/2026-publication-v1/tokenizer_bpe.model",
+      "sha256": "e4632be41d9fb115b1c47d36edd5fd33643f60469e2a4aceb81d345afb8ff5ea",
+      "size_bytes": 569265
+    },
+    "train": {
+      "path": "/home/prinako/dev/BPE/pecSC/data/train/europarl_bpe/2026-publication-v1/train_en_en.pkl",
+      "sha256": "9ceab8e4feb33ee49b89bbeb227cdf82e7264a5b17eb56fbe9b0a78eb383bf35",
+      "size_bytes": 157554805
+    },
+    "val": {
+      "path": "/home/prinako/dev/BPE/pecSC/data/train/europarl_bpe/2026-publication-v1/val_en_en.pkl",
+      "sha256": "f9c5af864a32dedaff2a164151dd93462172164606d5d87dbae394064e8a6f9c",
+      "size_bytes": 33785271
+    }
+  },
+  "diagnostics": {
+    "batch_indices": "one-based",
+    "enabled": true,
+    "file": "diagnostics.csv",
+    "noise_amplification": "1 / |h| (amplitude/std); power column is 1 / |h|^2"
+  },
+  "epoch_budget": 10,
+  "experiment_id": "ablation-ce1-feature-wd0-10epochs-seed44",
+  "git": {
+    "branch": "kd-exp",
+    "commit": "6591a6dc1d56df87b597c5a3976e34fb61a2ed01",
+    "dirty": true
+  },
+  "loss": {
+    "alpha": 1.0,
+    "beta": 0.0,
+    "feature_alignment": "normalized decoder cosine squared",
+    "gamma": 0.1,
+    "label_smoothing": 0.1,
+    "temperature": 2.0
+  },
+  "model_type": "KD Student",
+  "optimizer": {
+    "betas": [
+      0.9,
+      0.98
+    ],
+    "eps": 1e-08,
+    "lr": 0.0001,
+    "name": "Adam",
+    "weight_decay": 0.0
+  },
+  "runtime": {
+    "cuda_available": true,
+    "cuda_runtime": "13.0",
+    "gpu": "NVIDIA GeForce RTX 5060 Ti",
+    "python": "3.12.15",
+    "pytorch": "2.13.0+cu130"
+  },
+  "schema_version": 1,
+  "seed": 44,
+  "selected_checkpoint": {
+    "epoch": 10,
+    "path": "/home/prinako/dev/BPE/pecSC/results/article_kd/diagnostics/ablation-ce1-feature-wd0-10epochs-seed44/student_best.pth",
+    "selection_metric": "validation_cross_entropy",
+    "selection_value": 2.0889423099057427,
+    "sha256": "1a94f0ffd90762f6c9e9b09e19f207ddcbf3427360201f3653e164d5d97f23bb",
+    "size_bytes": 37741945
+  },
+  "teacher_checkpoints": {
+    "decoder": {
+      "path": "/home/prinako/dev/BPE/pecSC/results/article_kd/training/teacher-bpe32k-seed42/decoder_38.pth",
+      "sha256": "01517b94fabf7b5a5fb0de10d0302ca79765dabba7856030b0bce0ff0a4e4bbd",
+      "size_bytes": 42010503
+    },
+    "encoder": {
+      "path": "/home/prinako/dev/BPE/pecSC/results/article_kd/training/teacher-bpe32k-seed42/encoder_38.pth",
+      "sha256": "46180cf73a876a3cc5b8f3be691ca141c020d1c482e5591bcd42cded78616870",
+      "size_bytes": 22958643
+    }
+  },
+  "tokenizer_vocab": {
+    "path": "/home/prinako/dev/BPE/pecSC/data/train/europarl_bpe/2026-publication-v1/vocab_bpe.json",
+    "sha256": "361e8d219ec3649231ca90eba8f9009725b8ce35e4efe1ee2b88cb69690c544f",
+    "size_bytes": 1563044
+  }
+}

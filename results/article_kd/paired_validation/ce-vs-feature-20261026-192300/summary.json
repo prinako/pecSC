@@ -1,0 +1,25 @@
+{
+  "partial": true,
+  "metrics": {
+    "batch_mean_ce": {
+      "mean_paired_difference": -0.005676341741333302,
+      "sample_sd_across_training_seeds": 0.014691538434744057,
+      "training_seeds_favoring_feature": 2,
+      "training_seed_count": 4
+    },
+    "token_mean_ce": {
+      "mean_paired_difference": -0.005751000829489872,
+      "sample_sd_across_training_seeds": 0.014407221850745059,
+      "training_seeds_favoring_feature": 2,
+      "training_seed_count": 4
+    },
+    "token_mean_nll": {
+      "mean_paired_difference": -0.010675257947071498,
+      "sample_sd_across_training_seeds": 0.012653468444518319,
+      "training_seeds_favoring_feature": 3,
+      "training_seed_count": 4
+    }
+  },
+  "inference_unit": "training seed, after averaging channel trials within seed",
+  "caution": "Descriptive validation comparison of fixed selected checkpoints; not an independent test result or automatic significance claim."
+}

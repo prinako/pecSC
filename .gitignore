@@ -36,3 +36,7 @@ results/*
 !results/article_kd/figures/.gitkeep
 student
 *.txt
+
+# Large local experiment outputs
+/results/article_kd/logs/
+/results/article_kd/diagnostics/**/diagnostics.csv
