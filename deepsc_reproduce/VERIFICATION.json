@@ -1,0 +1,73 @@
+{
+  "source_commit": "670f7fb5a5b8b060aa6647aa6307ae1cee647989",
+  "standard_library_checks_passed": 11,
+  "pytorch_numerical_checks_skipped": 1,
+  "gpu_training_executed_here": false,
+  "saved_record_replay": [
+    {
+      "variant": "m2",
+      "seeds": [
+        42,
+        43,
+        44,
+        45
+      ],
+      "n": 4,
+      "candidate_mean": 2.349879391641452,
+      "candidate_sample_sd": 0.015275835136807235,
+      "matched_m1_mean": 2.0981242155946536,
+      "mean_delta": 0.2517551760467991,
+      "relative_mean_change_percent": 11.99905964459047,
+      "seeds_favoring_candidate": 0
+    },
+    {
+      "variant": "feature",
+      "seeds": [
+        42,
+        43,
+        44,
+        45
+      ],
+      "n": 4,
+      "candidate_mean": 2.0902713862246483,
+      "candidate_sample_sd": 0.007720266833942715,
+      "matched_m1_mean": 2.0981242155946536,
+      "mean_delta": -0.00785282937000531,
+      "relative_mean_change_percent": -0.3742785728146014,
+      "seeds_favoring_candidate": 4
+    },
+    {
+      "variant": "logit",
+      "seeds": [
+        42
+      ],
+      "n": 1,
+      "candidate_mean": 2.3013937937637854,
+      "candidate_sample_sd": null,
+      "matched_m1_mean": 2.0931811207409563,
+      "mean_delta": 0.2082126730228291,
+      "relative_mean_change_percent": 9.947188561930309,
+      "seeds_favoring_candidate": 0
+    }
+  ],
+  "paired_replay": {
+    "batch_mean_ce": {
+      "mean_paired_difference": -0.006089746432780329,
+      "sample_sd_across_training_seeds": 0.011150355662218697,
+      "training_seeds_favoring_feature": 3,
+      "training_seed_count": 4
+    },
+    "token_mean_ce": {
+      "mean_paired_difference": -0.006156192781584592,
+      "sample_sd_across_training_seeds": 0.01113798782533854,
+      "training_seeds_favoring_feature": 3,
+      "training_seed_count": 4
+    },
+    "token_mean_nll": {
+      "mean_paired_difference": -0.0076516726867674025,
+      "sample_sd_across_training_seeds": 0.007718110429587419,
+      "training_seeds_favoring_feature": 3,
+      "training_seed_count": 4
+    }
+  }
+}
