@@ -8,8 +8,9 @@ Provide reproducible final evidence for the IEEE paper comparing:
 - **M0:** freshly trained full DeepSC Teacher.
 - **M1:** four-layer/eight-head compact receiver trained with CE only; frozen Teacher TX.
 - **M2:** same compact receiver trained with receiver-only KD; frozen Teacher TX.
+- **M3 (planned):** Liu et al. — receiver-side adaptation, using the same frozen Teacher TX and compact receiver constraints.
 
-An external published-method baseline (e.g., a carefully adapted KD-SemCom configuration) may be added after the three-model core is validated. Label adaptations accurately.
+The approved external-baseline plan is now available in [LIU_BASELINE_PLAN.md](LIU_BASELINE_PLAN.md), synchronized from the Prince_SC plan on 2026-10-30. Audit the original method and adaptation feasibility before implementation; verify M1 stability and freeze a matched protocol before M3 training. M3 is an explicitly labelled adaptation, not an exact reproduction. This documentation update does not establish a completed M3 run.
 
 ## Stage 1 — Blocking preparation
 - [x] Validate all split ratios and normalized-content overlap across partitions. Duplicate normalized English sources are retained but grouped into one split.
@@ -32,6 +33,12 @@ training or held-out test evaluation was performed during Stage 1 implementation
 - [ ] Train CE-only (alpha=1, beta=0, gamma=0) and KD (candidate 0.6/0.3/0.1, T=2) with matched architecture/initialization/optimizer/budget/channel.
 - [ ] Collect training and validation loss breakdown, checkpoint identity and logs.
 
+## Stage 2B — Published-method baseline M3
+- [ ] Audit Liu et al. and record source-equation/algorithm-to-code mapping, retained transfer signals, masks/normalization, and every receiver-side adaptation.
+- [ ] Confirm that a meaningful adaptation is feasible; if essential method elements cannot be retained, revisit the comparison instead of naming a generic CE+KL ablation after Liu.
+- [ ] Implement M3 with a distinct method ID and focused loss/trainability/shared-channel checks.
+- [ ] Train under matched M1/M2 non-loss settings; tune method-specific settings on validation with a declared comparable budget and record selected artifacts.
+
 ## Stage 3 — Evaluation
 - [ ] Build deterministic EN->EN BPE greedy decoder and optional matched beam decoder.
 - [ ] Fix SNR/channel grid, independently seeded noise trials, evaluation batch sizes, metric signatures and semantic embedding version **before testing**.
@@ -39,6 +46,7 @@ training or held-out test evaluation was performed during Stage 1 implementation
 - [ ] Aggregate **corpus BLEU** per model/channel/SNR/trial; semantic similarity, optional chrF/ROUGE/CER/WER and uncertainty across trials.
 - [ ] Measure receiver/full-system parameter counts, serialized checkpoint size, and synchronized warmed-up inference latency on documented hardware.
 - [ ] Compare matched CE-only vs KD and run loss ablations if resources permit.
+- [ ] Include M3 in the common M0–M3 evaluation only after its source mapping, adaptation, selected checkpoints and protocol are verified; never substitute published metric values for locally matched measurements.
 
 ## Stage 4 — Article handoff
 - [ ] Produce validated tables/figures for `Prince_SC` Experimental Methodology and Results and Discussion.
