@@ -48,8 +48,7 @@ from utils.experiment_manifest import (
 from utils.publication_data import resolve_training_inputs
 
 
-STUDENT_NUM_LAYERS = 4
-STUDENT_NUM_HEADS = 8
+
 
 
 def parse_args():
@@ -90,10 +89,14 @@ def parse_args():
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--epochs", type=int, default=10)
     parser.add_argument("--lr", type=float, default=1e-4)
-    parser.add_argument("--weight-decay", type=float, default=5e-4)
+    parser.add_argument("--weight-decay", type=float, default=0)
     parser.add_argument("--grad-clip", type=float, default=1.0)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--num-workers", type=int, default=0)
+
+    # studennt train
+    parser.add_argument("--student_num_layers", type=int, default=4)
+    parser.add_argument("--student_num_heads", type=int, default=8)
 
     # channel
     parser.add_argument("--channel", type=str, default="Rayleigh", choices=["AWGN", "Rayleigh", "Rician"])
@@ -133,35 +136,47 @@ def parse_args():
 def validate_loss_configuration(alpha: float, beta: float, gamma: float, temperature: float) -> str:
     if min(alpha, beta, gamma) < 0:
         raise ValueError("Loss weights alpha, beta and gamma must be non-negative")
+    
     if alpha + beta + gamma <= 0:
         raise ValueError("At least one loss weight must be positive")
+    
     if temperature <= 0:
         raise ValueError("temperature must be positive")
+    
     return "CE-only Student" if beta == 0 and gamma == 0 else "KD Student"
 
 
 def load_teacher_checkpoints(model, encoder_path, decoder_path, device, expected_architecture=None):
     paths = [os.path.abspath(os.path.expanduser(p)) for p in (encoder_path, decoder_path)]
+    
     for path in paths:
         if not os.path.isfile(path):
             raise FileNotFoundError(f"Teacher checkpoint does not exist: {path}")
+    
     enc = torch.load(paths[0], map_location=device, weights_only=True)
     dec = torch.load(paths[1], map_location=device, weights_only=True)
+    
     expected_enc = {"encoder", "channel_encoder"}
     expected_dec = {"channel_decoder", "decoder", "dense"}
+
     if not isinstance(enc, dict) or not expected_enc.issubset(enc):
         raise ValueError(f"Teacher encoder checkpoint must contain {sorted(expected_enc)}")
+    
     if not isinstance(dec, dict) or not expected_dec.issubset(dec):
         raise ValueError(f"Teacher decoder checkpoint must contain {sorted(expected_dec)}")
+    
     unexpected_enc = set(enc) - expected_enc - {"meta"}
     unexpected_dec = set(dec) - expected_dec - {"meta"}
+    
     if unexpected_enc or unexpected_dec:
         raise ValueError(
             f"Unexpected Teacher checkpoint components: encoder={sorted(unexpected_enc)}, "
             f"decoder={sorted(unexpected_dec)}"
         )
+    
     if enc.get("meta") != dec.get("meta"):
         raise ValueError("Teacher encoder and decoder checkpoint metadata do not match")
+    
     if expected_architecture is not None:
         recorded = enc.get("meta", {}).get("architecture")
         if recorded is None:
@@ -175,6 +190,7 @@ def load_teacher_checkpoints(model, encoder_path, decoder_path, device, expected
         }
         if differences:
             raise ValueError(f"Teacher checkpoint architecture metadata mismatch: {differences}")
+    
     try:
         model.encoder.load_state_dict(enc["encoder"], strict=True)
         model.channel_encoder.load_state_dict(enc["channel_encoder"], strict=True)
@@ -186,8 +202,10 @@ def load_teacher_checkpoints(model, encoder_path, decoder_path, device, expected
             "Teacher checkpoint is incompatible with the configured architecture, "
             "vocabulary size, or positional capacity"
         ) from exc
+    
     model.requires_grad_(False)
     model.eval()
+    
     return paths
 
 
@@ -202,13 +220,13 @@ def configure_trainability(transmitter, teacher, student):
 def build_student_receiver(num_vocab, args, device):
     """Build the single compact receiver architecture used by CE and KD."""
     return Student(
-        STUDENT_NUM_LAYERS,
+        args.student_num_layers,
         num_vocab,
         num_vocab,
         args.max_len,
         args.max_len,
         args.d_model,
-        STUDENT_NUM_HEADS,
+        args.student_num_heads,
         args.dff,
         args.dropout,
     ).to(device)
@@ -284,18 +302,23 @@ def _diagnostic_row(
         "gradients": [p.grad for p in student.parameters() if p.grad is not None],
         "parameters": list(student.parameters()),
     }
+    
     has_nan = False
     has_inf = False
     nonfinite_components = []
+    
     for name, values in components.items():
         values = values if isinstance(values, list) else [values]
         component_nan = component_inf = False
+        
         for value in values:
             value_nan, value_inf = _tensor_nonfinite_kind(value)
             component_nan = component_nan or value_nan
             component_inf = component_inf or value_inf
+        
         if component_nan or component_inf:
             nonfinite_components.append(name)
+        
         has_nan = has_nan or component_nan
         has_inf = has_inf or component_inf
 
@@ -323,6 +346,7 @@ def _diagnostic_row(
         "has_inf": has_inf,
         "nonfinite_components": ";".join(nonfinite_components),
     }
+    
     scalar_values = [
         row["snr_db"], row["noise_std"], row["ce"], row["loss"],
         row["gradient_norm_before_clipping"], row["parameter_norm"],
@@ -330,11 +354,14 @@ def _diagnostic_row(
         row["theoretical_noise_amplification"],
         row["theoretical_noise_power_amplification"],
     ]
+    
     for value in (row["rayleigh_real"], row["rayleigh_imag"], row["rayleigh_magnitude"]):
         if value is not None:
             scalar_values.append(value)
+    
     row["has_nan"] = row["has_nan"] or any(math.isnan(value) for value in scalar_values)
     row["has_inf"] = row["has_inf"] or any(math.isinf(value) for value in scalar_values)
+    
     if row["has_nan"] or row["has_inf"]:
         warnings.warn(
             "Non-finite diagnostic at epoch "
@@ -347,7 +374,332 @@ def _diagnostic_row(
         )
     return row
 
+# @torch.no_grad()
+# def validate_epoch(
+#     epoch,
+#     transmitter,
+#     teacher: Receiver,
+#     student: Student,
+#     val_loader,
+#     pad_idx,
+#     channel,
+#     noise_std,
+#     device: torch.device,
+#     criterion,
+#     args,
+# ):
+#     transmitter.eval()
+#     teacher.eval()
+#     student.eval()
+
+
+#     total_loss = 0.0
+#     total_ce = 0.0
+#     total_kd = 0.0
+#     total_feat = 0.0
+#     total_ce_ppl = 0.0
+
+#     pbar = tqdm(val_loader)
+
+#     with torch.no_grad():
+#         for src, trg in pbar:
+#             src = src.to(device)
+#             trg = trg.to(device)
+
+#             trg_inp = trg[:, :-1]
+#             trg_real = trg[:, 1:]
+
+#             src_mask, look_ahead_mask = create_masks(src, trg_inp, pad_idx)
+
+#             tx_en_out, tx_ch_en_out, Tx_sig, z_noisy = transmitter(
+#                 src, 
+#                 src_mask, 
+#                 channel, 
+#                 noise_std
+#             )
+
+#             use_kd = args.beta > 0 or args.gamma > 0
+#             if use_kd:
+#                 t_logits, rx_ch_dec_out, rx_dec_out = teacher(
+#                     z_noisy=z_noisy, trg_inp=trg_inp,
+#                     look_ahead_mask=look_ahead_mask, src_mask=src_mask
+#                 )
+
+#             s_logits, s_ch_dec_out, s_dec_out = student(
+#                 z_noisy, 
+#                 trg_inp, 
+#                 look_ahead_mask, 
+#                 src_mask
+#             )
+
+#             ce, ce_ppl = masked_ce_loss(
+#                 s_logits,
+#                 trg_real,
+#                 pad_idx,
+#                 label_smoothing=0.1
+#             )
+
+#             # ce = masked_ce_loss(s_logits, trg_real, pad_idx)
+#             # ce_s1 = loss_function(
+#             #     s1_logits.contiguous().view(-1, s1_logits.size(-1)),
+#             #     trg_real.contiguous().view(-1), 
+#             #     pad_idx, 
+#             #     criterion
+#             # )
+
+#             kd = (kd_kl_loss(s_logits, t_logits, trg_real, pad_idx, args.temperature)
+#                   if args.beta > 0 else ce.new_zeros(()))
+
+#             # feat = feature_distillation_loss(
+#             #     student_feat=s_ch_dec_out, 
+#             #     teacher_feat=rx_ch_dec_out.detach(), 
+#             #     targets=src,
+#             #     pad_idx=pad_idx,
+#             # )
+
+#             feat = (feature_distillation_loss_cosine_normalized(
+#                 student_feat=s_dec_out, teacher_feat=rx_dec_out.detach(),
+#                 targets=trg_real, pad_idx=pad_idx, eps=1e-8
+#             ) if args.gamma > 0 else ce.new_zeros(()))
+
+#             weighted_ce = args.alpha * ce
+#             weighted_kd = args.beta * kd
+#             weighted_feat = args.gamma * feat
+
+#             loss = weighted_ce + weighted_kd + weighted_feat
+
+#             total_loss += float(loss.item())
+#             total_ce += float(ce.item())
+#             total_kd += float(kd.item())
+#             total_feat += float(feat.item())
+#             total_ce_ppl += float(ce_ppl)
+
+#             pbar.set_description(f"Epoch {epoch + 1} Valid")
+
+#             pbar.set_postfix(
+#                 Loss=f"{loss.item():.3f}",
+#                 CE=f"{weighted_ce.item():.3f}",
+#                 CE_PPL=f"{ce_ppl:.3f}",
+#                 KD=f"{weighted_kd.item():.3f}",
+#                 FEAT=f"{weighted_feat.item():.3f}",
+#             )
+
+#     n = max(len(val_loader), 1)
+
+#     return{
+#         "loss": total_loss / n,
+#         "ce": total_ce / n,
+#         "kd": total_kd / n,
+#         "tf": total_feat / n,
+#     }
+
+
+# def train(
+#     transmitter: Transmitter, 
+#     teacher: Receiver, 
+#     student: Student, 
+#     train_loader: DataLoader, 
+#     optimizer: optim.Adam,
+#     pad_idx,
+#     channel,
+#     device: torch.device,
+#     criterion,
+#     epoch,
+#     args,
+#     diagnostic_logger=None,
+#     ):
+
+#     for p in teacher.parameters():
+#         p.requires_grad = False
+    
+#     for p in transmitter.parameters():
+#         p.requires_grad = False
+    
+#     transmitter.eval()
+#     teacher.eval()
+
+#     student.train()
+
+#     total_loss = 0.0
+#     total_ce = 0.0
+#     total_kd = 0.0
+#     total_feat = 0.0
+#     total_ce_ppl = 0.0
+
+#     num_batches=0.0
+
+#     pbar = tqdm(train_loader)
+
+#     for batch_index, (src, trg) in enumerate(pbar):
+#         # print(batch.shape)
+#         src = src.to(device)
+#         trg = trg.to(device)
+
+#         trg_inp = trg[:, :-1]
+#         trg_real = trg[:, 1:]
+
+#         opt = optimizer
+
+#         opt.zero_grad()
+
+#         src_mask, look_ahead_mask = create_masks(src, trg_inp, pad_idx)
+
+#         if args.snr_mode == "fixed":
+#             snr_db = args.snr_db
+#         else:
+#             snr_db = np.random.uniform(
+#                 args.snr_db_low,
+#                 args.snr_db_high
+#             )
+
+#         noise_std = snr_to_noise(snr_db)
+
+#         with torch.no_grad():
+#             tx_result = transmitter(
+#                 src,
+#                 src_mask,
+#                 channel,
+#                 noise_std,
+#                 return_channel_metadata=diagnostic_logger is not None,
+#             )
+#             if diagnostic_logger is None:
+#                 _, _, _, z_noisy = tx_result
+#                 channel_metadata = None
+#             else:
+#                 _, _, _, z_noisy, channel_metadata = tx_result
+            
+#             if args.beta > 0 or args.gamma > 0:
+#                 t_logits, t_rx_ch, t_rx_dec = teacher(
+#                     z_noisy=z_noisy, trg_inp=trg_inp,
+#                     look_ahead_mask=look_ahead_mask, src_mask=src_mask
+#                 )
+
+#         s_logits, s_rx_ch, s_dec_out = student(
+#             z_noisy, 
+#             trg_inp, 
+#             look_ahead_mask, 
+#             src_mask
+#         )
+
+#         ce, ce_ppl = masked_ce_loss(
+#             s_logits,
+#             trg_real,
+#             pad_idx,
+#             label_smoothing=0.1,
+#         )
+
+#         kd = (kd_kl_loss(s_logits, t_logits, trg_real, pad_idx, args.temperature)
+#               if args.beta > 0 else ce.new_zeros(()))
+
+#         # feat = feature_distillation_loss(
+#         #     student_feat=s_rx_ch,
+#         #     teacher_feat=t_rx_ch.detach(),
+#         #     targets=src,
+#         #     pad_idx=pad_idx,
+#         # )
+
+#         feat = (feature_distillation_loss_cosine_normalized(
+#             student_feat=s_dec_out, teacher_feat=t_rx_dec.detach(),
+#             targets=trg_real, pad_idx=pad_idx, eps=1e-8
+#         ) if args.gamma > 0 else ce.new_zeros(()))
+
+#         weighted_ce = args.alpha * ce
+#         weighted_kd = args.beta * kd
+#         weighted_feat = args.gamma * feat
+
+#         loss = weighted_ce + weighted_kd + weighted_feat
+
+#         # loss = (args.alpha * ce) + (args.beta * kd) + args.gamma * feat
+
+#         loss.backward()
+
+#         if diagnostic_logger is not None:
+#             gradient_norm = _gradient_l2_norm(student.parameters())
+#             parameter_norm = _parameter_l2_norm(student.parameters())
+#             diagnostic_logger.write(_diagnostic_row(
+#                 epoch=epoch,
+#                 batch_index=batch_index,
+#                 channel=channel,
+#                 snr_db=snr_db,
+#                 noise_std=noise_std,
+#                 channel_metadata=channel_metadata,
+#                 ce=ce,
+#                 loss=loss,
+#                 gradient_norm=gradient_norm,
+#                 parameter_norm=parameter_norm,
+#                 z_noisy=z_noisy,
+#                 student=student,
+#             ))
+
+#         if args.grad_clip is not None and args.grad_clip > 0:
+#             torch.nn.utils.clip_grad_norm_(student.parameters(), args.grad_clip)
+#             # torch.nn.utils.clip_grad_norm_(student_2.parameters(), args.grad_clip)
+        
+#         opt.step()
+
+#         total_loss += float(loss.item())
+#         total_ce += float(ce.item())
+#         total_kd += float(kd.item())
+#         total_feat += float(feat.item())
+#         total_ce_ppl += float(ce_ppl)
+
+#         num_batches += 1
+
+#         pbar.set_description(f"Epoch {epoch + 1} Train")
+
+#         pbar.set_postfix(
+#             Loss=f"{loss.item():.3f}",
+#             CE=f"{weighted_ce.item():.3f}",
+#             CE_PPL=f"{ce_ppl:.3f}",
+#             KD=f"{weighted_kd.item():.3f}",
+#             TF=f"{weighted_feat.item():.3f}"
+#         )
+
+#     n = len(train_loader)
+
+#     return {
+#             "loss": total_loss / n,
+#             "ce": total_ce / n,
+#             "kd": total_kd / n,
+#             "tf": total_feat / n,
+#             "ce_ppl": total_ce_ppl / n
+#         }
+
+# ==============================================
+# Was change on 31/10/2026 to:
+#===============================================
+
 @torch.no_grad()
+def batch_nll_and_tokens(logits, targets, pad_idx):
+    """Summed unsmoothed NLL and number of non-padding tokens."""
+    nll_sum = torch.nn.functional.cross_entropy(
+        logits.detach().float().reshape(-1, logits.size(-1)),
+        targets.reshape(-1),
+        ignore_index=pad_idx,
+        reduction="sum",
+        label_smoothing=0.0,
+    )
+
+    num_tokens = (targets != pad_idx).sum().item()
+
+    return float(nll_sum.item()), int(num_tokens)
+
+
+def nll_and_perplexity(total_nll, total_tokens):
+    """Convert accumulated token-level NLL to dataset perplexity."""
+    if total_tokens == 0:
+        return float("nan"), float("nan")
+
+    mean_nll = total_nll / total_tokens
+
+    try:
+        perplexity = math.exp(mean_nll)
+    except OverflowError:
+        perplexity = float("inf")
+
+    return mean_nll, perplexity
+
+
 def validate_epoch(
     epoch,
     transmitter,
@@ -365,12 +717,14 @@ def validate_epoch(
     teacher.eval()
     student.eval()
 
-
     total_loss = 0.0
     total_ce = 0.0
     total_kd = 0.0
     total_feat = 0.0
-    total_ce_ppl = 0.0
+
+    total_nll = 0.0
+    total_tokens = 0
+    num_batches = 0
 
     pbar = tqdm(val_loader)
 
@@ -382,58 +736,63 @@ def validate_epoch(
             trg_inp = trg[:, :-1]
             trg_real = trg[:, 1:]
 
-            src_mask, look_ahead_mask = create_masks(src, trg_inp, pad_idx)
-
-            tx_en_out, tx_ch_en_out, Tx_sig, z_noisy = transmitter(
-                src, 
-                src_mask, 
-                channel, 
-                noise_std
+            src_mask, look_ahead_mask = create_masks(
+                src, trg_inp, pad_idx
             )
 
-            use_kd = args.beta > 0 or args.gamma > 0
-            if use_kd:
-                t_logits, rx_ch_dec_out, rx_dec_out = teacher(
-                    z_noisy=z_noisy, trg_inp=trg_inp,
-                    look_ahead_mask=look_ahead_mask, src_mask=src_mask
+            _, _, _, z_noisy = transmitter(
+                src,
+                src_mask,
+                channel,
+                noise_std,
+            )
+
+            if args.beta > 0 or args.gamma > 0:
+                t_logits, _, t_rx_dec = teacher(
+                    z_noisy=z_noisy,
+                    trg_inp=trg_inp,
+                    look_ahead_mask=look_ahead_mask,
+                    src_mask=src_mask,
                 )
 
-            s_logits, s_ch_dec_out, s_dec_out = student(
-                z_noisy, 
-                trg_inp, 
-                look_ahead_mask, 
-                src_mask
+            s_logits, _, s_dec_out = student(
+                z_noisy,
+                trg_inp,
+                look_ahead_mask,
+                src_mask,
             )
 
-            ce, ce_ppl = masked_ce_loss(
+            # Preserve the existing smoothed CE.
+            ce, _ = masked_ce_loss(
                 s_logits,
                 trg_real,
                 pad_idx,
-                label_smoothing=0.1
+                label_smoothing=0.1,
             )
 
-            # ce = masked_ce_loss(s_logits, trg_real, pad_idx)
-            # ce_s1 = loss_function(
-            #     s1_logits.contiguous().view(-1, s1_logits.size(-1)),
-            #     trg_real.contiguous().view(-1), 
-            #     pad_idx, 
-            #     criterion
-            # )
+            kd = (
+                kd_kl_loss(
+                    s_logits,
+                    t_logits,
+                    trg_real,
+                    pad_idx,
+                    args.temperature,
+                )
+                if args.beta > 0
+                else ce.new_zeros(())
+            )
 
-            kd = (kd_kl_loss(s_logits, t_logits, trg_real, pad_idx, args.temperature)
-                  if args.beta > 0 else ce.new_zeros(()))
-
-            # feat = feature_distillation_loss(
-            #     student_feat=s_ch_dec_out, 
-            #     teacher_feat=rx_ch_dec_out.detach(), 
-            #     targets=src,
-            #     pad_idx=pad_idx,
-            # )
-
-            feat = (feature_distillation_loss_cosine_normalized(
-                student_feat=s_dec_out, teacher_feat=rx_dec_out.detach(),
-                targets=trg_real, pad_idx=pad_idx, eps=1e-8
-            ) if args.gamma > 0 else ce.new_zeros(()))
+            feat = (
+                feature_distillation_loss_cosine_normalized(
+                    student_feat=s_dec_out,
+                    teacher_feat=t_rx_dec.detach(),
+                    targets=trg_real,
+                    pad_idx=pad_idx,
+                    eps=1e-8,
+                )
+                if args.gamma > 0
+                else ce.new_zeros(())
+            )
 
             weighted_ce = args.alpha * ce
             weighted_kd = args.beta * kd
@@ -441,37 +800,56 @@ def validate_epoch(
 
             loss = weighted_ce + weighted_kd + weighted_feat
 
+            # Independent reporting metric: unsmoothed token NLL.
+            batch_nll, batch_tokens = batch_nll_and_tokens(
+                s_logits, trg_real, pad_idx
+            )
+
+            total_nll += batch_nll
+            total_tokens += batch_tokens
+
             total_loss += float(loss.item())
             total_ce += float(ce.item())
             total_kd += float(kd.item())
             total_feat += float(feat.item())
-            total_ce_ppl += float(ce_ppl)
+            num_batches += 1
+
+            _, running_ppl = nll_and_perplexity(
+                total_nll, total_tokens
+            )
 
             pbar.set_description(f"Epoch {epoch + 1} Valid")
-
             pbar.set_postfix(
                 Loss=f"{loss.item():.3f}",
                 CE=f"{weighted_ce.item():.3f}",
-                CE_PPL=f"{ce_ppl:.3f}",
+                PPL=f"{running_ppl:.3f}",
                 KD=f"{weighted_kd.item():.3f}",
                 FEAT=f"{weighted_feat.item():.3f}",
             )
 
-    n = max(len(val_loader), 1)
+    if num_batches == 0:
+        raise ValueError("Validation loader produced no batches.")
 
-    return{
-        "loss": total_loss / n,
-        "ce": total_ce / n,
-        "kd": total_kd / n,
-        "tf": total_feat / n,
+    mean_nll, perplexity = nll_and_perplexity(
+        total_nll, total_tokens
+    )
+
+    return {
+        "loss": total_loss / num_batches,
+        "ce": total_ce / num_batches,
+        "kd": total_kd / num_batches,
+        "tf": total_feat / num_batches,
+        "nll": mean_nll,
+        "perplexity": perplexity,
+        "num_tokens": total_tokens,
     }
 
 
 def train(
-    transmitter: Transmitter, 
-    teacher: Receiver, 
-    student: Student, 
-    train_loader: DataLoader, 
+    transmitter: Transmitter,
+    teacher: Receiver,
+    student: Student,
+    train_loader: DataLoader,
     optimizer: optim.Adam,
     pad_idx,
     channel,
@@ -480,49 +858,47 @@ def train(
     epoch,
     args,
     diagnostic_logger=None,
-    ):
+):
+    for parameter in teacher.parameters():
+        parameter.requires_grad = False
 
-    for p in teacher.parameters():
-        p.requires_grad = False
-    
-    for p in transmitter.parameters():
-        p.requires_grad = False
-    
+    for parameter in transmitter.parameters():
+        parameter.requires_grad = False
+
     transmitter.eval()
     teacher.eval()
-
     student.train()
 
     total_loss = 0.0
     total_ce = 0.0
     total_kd = 0.0
     total_feat = 0.0
-    total_ce_ppl = 0.0
 
-    num_batches=0.0
+    total_nll = 0.0
+    total_tokens = 0
+    num_batches = 0
 
     pbar = tqdm(train_loader)
 
     for batch_index, (src, trg) in enumerate(pbar):
-        # print(batch.shape)
         src = src.to(device)
         trg = trg.to(device)
 
         trg_inp = trg[:, :-1]
         trg_real = trg[:, 1:]
 
-        opt = optimizer
+        optimizer.zero_grad()
 
-        opt.zero_grad()
-
-        src_mask, look_ahead_mask = create_masks(src, trg_inp, pad_idx)
+        src_mask, look_ahead_mask = create_masks(
+            src, trg_inp, pad_idx
+        )
 
         if args.snr_mode == "fixed":
             snr_db = args.snr_db
         else:
             snr_db = np.random.uniform(
                 args.snr_db_low,
-                args.snr_db_high
+                args.snr_db_high,
             )
 
         noise_std = snr_to_noise(snr_db)
@@ -535,46 +911,59 @@ def train(
                 noise_std,
                 return_channel_metadata=diagnostic_logger is not None,
             )
+
             if diagnostic_logger is None:
                 _, _, _, z_noisy = tx_result
                 channel_metadata = None
             else:
                 _, _, _, z_noisy, channel_metadata = tx_result
-            
+
             if args.beta > 0 or args.gamma > 0:
-                t_logits, t_rx_ch, t_rx_dec = teacher(
-                    z_noisy=z_noisy, trg_inp=trg_inp,
-                    look_ahead_mask=look_ahead_mask, src_mask=src_mask
+                t_logits, _, t_rx_dec = teacher(
+                    z_noisy=z_noisy,
+                    trg_inp=trg_inp,
+                    look_ahead_mask=look_ahead_mask,
+                    src_mask=src_mask,
                 )
 
-        s_logits, s_rx_ch, s_dec_out = student(
-            z_noisy, 
-            trg_inp, 
-            look_ahead_mask, 
-            src_mask
+        s_logits, _, s_dec_out = student(
+            z_noisy,
+            trg_inp,
+            look_ahead_mask,
+            src_mask,
         )
 
-        ce, ce_ppl = masked_ce_loss(
+        # Preserve the existing optimization objective.
+        ce, _ = masked_ce_loss(
             s_logits,
             trg_real,
             pad_idx,
             label_smoothing=0.1,
         )
 
-        kd = (kd_kl_loss(s_logits, t_logits, trg_real, pad_idx, args.temperature)
-              if args.beta > 0 else ce.new_zeros(()))
+        kd = (
+            kd_kl_loss(
+                s_logits,
+                t_logits,
+                trg_real,
+                pad_idx,
+                args.temperature,
+            )
+            if args.beta > 0
+            else ce.new_zeros(())
+        )
 
-        # feat = feature_distillation_loss(
-        #     student_feat=s_rx_ch,
-        #     teacher_feat=t_rx_ch.detach(),
-        #     targets=src,
-        #     pad_idx=pad_idx,
-        # )
-
-        feat = (feature_distillation_loss_cosine_normalized(
-            student_feat=s_dec_out, teacher_feat=t_rx_dec.detach(),
-            targets=trg_real, pad_idx=pad_idx, eps=1e-8
-        ) if args.gamma > 0 else ce.new_zeros(()))
+        feat = (
+            feature_distillation_loss_cosine_normalized(
+                student_feat=s_dec_out,
+                teacher_feat=t_rx_dec.detach(),
+                targets=trg_real,
+                pad_idx=pad_idx,
+                eps=1e-8,
+            )
+            if args.gamma > 0
+            else ce.new_zeros(())
+        )
 
         weighted_ce = args.alpha * ce
         weighted_kd = args.beta * kd
@@ -582,61 +971,85 @@ def train(
 
         loss = weighted_ce + weighted_kd + weighted_feat
 
-        # loss = (args.alpha * ce) + (args.beta * kd) + args.gamma * feat
+        # Detached metric; it contributes no gradients.
+        batch_nll, batch_tokens = batch_nll_and_tokens(
+            s_logits, trg_real, pad_idx
+        )
+
+        total_nll += batch_nll
+        total_tokens += batch_tokens
 
         loss.backward()
 
         if diagnostic_logger is not None:
-            gradient_norm = _gradient_l2_norm(student.parameters())
-            parameter_norm = _parameter_l2_norm(student.parameters())
-            diagnostic_logger.write(_diagnostic_row(
-                epoch=epoch,
-                batch_index=batch_index,
-                channel=channel,
-                snr_db=snr_db,
-                noise_std=noise_std,
-                channel_metadata=channel_metadata,
-                ce=ce,
-                loss=loss,
-                gradient_norm=gradient_norm,
-                parameter_norm=parameter_norm,
-                z_noisy=z_noisy,
-                student=student,
-            ))
+            gradient_norm = _gradient_l2_norm(
+                student.parameters()
+            )
+            parameter_norm = _parameter_l2_norm(
+                student.parameters()
+            )
+
+            diagnostic_logger.write(
+                _diagnostic_row(
+                    epoch=epoch,
+                    batch_index=batch_index,
+                    channel=channel,
+                    snr_db=snr_db,
+                    noise_std=noise_std,
+                    channel_metadata=channel_metadata,
+                    ce=ce,
+                    loss=loss,
+                    gradient_norm=gradient_norm,
+                    parameter_norm=parameter_norm,
+                    z_noisy=z_noisy,
+                    student=student,
+                )
+            )
 
         if args.grad_clip is not None and args.grad_clip > 0:
-            torch.nn.utils.clip_grad_norm_(student.parameters(), args.grad_clip)
-            # torch.nn.utils.clip_grad_norm_(student_2.parameters(), args.grad_clip)
-        
-        opt.step()
+            torch.nn.utils.clip_grad_norm_(
+                student.parameters(),
+                args.grad_clip,
+            )
+
+        optimizer.step()
 
         total_loss += float(loss.item())
         total_ce += float(ce.item())
         total_kd += float(kd.item())
         total_feat += float(feat.item())
-        total_ce_ppl += float(ce_ppl)
-
         num_batches += 1
 
-        pbar.set_description(f"Epoch {epoch + 1} Train")
+        _, running_ppl = nll_and_perplexity(
+            total_nll, total_tokens
+        )
 
+        pbar.set_description(f"Epoch {epoch + 1} Train")
         pbar.set_postfix(
             Loss=f"{loss.item():.3f}",
             CE=f"{weighted_ce.item():.3f}",
-            CE_PPL=f"{ce_ppl:.3f}",
+            PPL=f"{running_ppl:.3f}",
             KD=f"{weighted_kd.item():.3f}",
-            TF=f"{weighted_feat.item():.3f}"
+            TF=f"{weighted_feat.item():.3f}",
         )
 
-    n = len(train_loader)
+    if num_batches == 0:
+        raise ValueError("Training loader produced no batches.")
+
+    mean_nll, perplexity = nll_and_perplexity(
+        total_nll, total_tokens
+    )
 
     return {
-            "loss": total_loss / n,
-            "ce": total_ce / n,
-            "kd": total_kd / n,
-            "tf": total_feat / n,
-            "ce_ppl": total_ce_ppl / n
-        }
+        "loss": total_loss / num_batches,
+        "ce": total_ce / num_batches,
+        "kd": total_kd / num_batches,
+        "tf": total_feat / num_batches,
+        "nll": mean_nll,
+        "perplexity": perplexity,
+        "num_tokens": total_tokens,
+    }
+
 
 def main():
     args = parse_args()
@@ -835,7 +1248,12 @@ def main():
             "val_ce": val_stats["ce"],
             "val_kd": val_stats["kd"],
             "val_tf": val_stats["tf"],
-            "ce_ppl": train_stats["ce_ppl"],
+            "nll": train_stats["nll"],
+            "perplexity": train_stats["perplexity"],
+            "val_nll": val_stats["nll"],
+            "val_perplexity": val_stats["perplexity"],
+            "num_tokens": train_stats["num_tokens"],
+            "val_num_tokens": val_stats["num_tokens"],
             "alpha": args.alpha,
             "beta": args.beta,
             "gamma": args.gamma,
