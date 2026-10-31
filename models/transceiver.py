@@ -145,8 +145,8 @@ class EncoderLayer(nn.Module):
     def __init__(self, d_model, num_heads, dff, dropout = 0.1):
         super(EncoderLayer, self).__init__()
         
-        self.mha = MultiHeadedAttention(num_heads, d_model, dropout = 0.1)
-        self.ffn = PositionwiseFeedForward(d_model, dff, dropout = 0.1)
+        self.mha = MultiHeadedAttention(num_heads, d_model, dropout=dropout)
+        self.ffn = PositionwiseFeedForward(d_model, dff, dropout = dropout)
         
         self.layernorm1 = nn.LayerNorm(d_model, eps=1e-6)
         self.layernorm2 = nn.LayerNorm(d_model, eps=1e-6)
@@ -166,9 +166,9 @@ class DecoderLayer(nn.Module):
     "Decoder is made of self-attn, src-attn, and feed forward (defined below)"
     def __init__(self, d_model, num_heads, dff, dropout):
         super(DecoderLayer, self).__init__()
-        self.self_mha = MultiHeadedAttention(num_heads, d_model, dropout = 0.1)
-        self.src_mha = MultiHeadedAttention(num_heads, d_model, dropout = 0.1)
-        self.ffn = PositionwiseFeedForward(d_model, dff, dropout = 0.1)
+        self.self_mha = MultiHeadedAttention(num_heads, d_model, dropout = dropout)
+        self.src_mha = MultiHeadedAttention(num_heads, d_model, dropout = dropout)
+        self.ffn = PositionwiseFeedForward(d_model, dff, dropout = dropout)
         
         self.layernorm1 = nn.LayerNorm(d_model, eps=1e-6)
         self.layernorm2 = nn.LayerNorm(d_model, eps=1e-6)
