@@ -416,13 +416,25 @@ def power_normalize(x: torch.Tensor)-> torch.Tensor:
     Returns:
         The normalized signal with shape [batch_size, seq_len, num_channels].
     """
-    x_square = torch.mul(x, x)
-    power = torch.mean(x_square).sqrt()
-    if power > 1:
-        x = torch.div(x, power)
+    # x_square = torch.mul(x, x)
+    # power = torch.mean(x_square).sqrt()
+    # if power > 1:
+    #     x = torch.div(x, power)
     
-    return x
+    # return x
+    # It was change at 31/10/2026
+    # Calculate RMS safely, ensuring we don't divide by zero.
+    # rms = x.square().mean().clamp_min(1e-12).sqrt()
 
+    # # Only scale if the magnitude is too large (power > 1)
+    # if rms > 1:
+    #     return x / rms
+    # else:
+    #     return x
+
+    rms = x.square().mean().clamp_min(1e-12).sqrt()
+    return x / rms
+    
 
 def snr_to_noise(snr: float)-> float:
     """
