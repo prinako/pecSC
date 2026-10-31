@@ -260,6 +260,9 @@ def main():
     parser.add_argument('--dff', default=512, type=int)
     parser.add_argument('--num-layers', default=8, type=int)
     parser.add_argument('--num-heads', default=16, type=int)
+    parser.add_argument("--dropout", type=float, default=0.1)
+    parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--weight-decay", type=float, default=0)
     parser.add_argument('--batch-size', default=32, type=int)
     parser.add_argument('--epochs', default=50, type=int) 
 
@@ -300,17 +303,17 @@ def main():
                 args.d_model, 
                 args.num_heads,
                 args.dff, 
-                0.1
+                args.dropout
             ).to(device)
 
     criterion = nn.CrossEntropyLoss(reduction = 'none')
 
     optimizer = torch.optim.Adam(
                     deepsc.parameters(),
-                    lr=1e-4, 
+                    lr=args.lr, 
                     betas=(0.9, 0.98), 
                     eps=1e-8, 
-                    weight_decay = 5e-4
+                    weight_decay = args.weight_decay
                 )
 
     #opt = NoamOpt(args.d_model, 1, 4000, optimizer)
