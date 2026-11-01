@@ -14,7 +14,7 @@ The approved external-baseline plan is now available in [LIU_BASELINE_PLAN.md](L
 
 ## Stage 1 — Blocking preparation
 - [x] Validate all split ratios and normalized-content overlap across partitions. Duplicate normalized English sources are retained but grouped into one split.
-- [ ] Create a fresh, train-only 70/15/15 BPE dataset with manifest and SHA-256 hashes. Confirm vocabulary/special tokens/max length and retained counts.
+- [x] Create a fresh, train-only 70/15/15 BPE dataset with manifest and SHA-256 hashes. Confirm vocabulary/special tokens/max length and retained counts.
 - [x] Add explicit `--data-dir` and consistent absolute-or-data-relative `--vocab-file` handling to Teacher and Student training.
 - [x] Eliminate test-set access during Teacher and Student training.
 - [x] Replace hardcoded Teacher filenames with required `--teacher-encoder` and `--teacher-decoder`; strict loading validates tensor/vocabulary/positional compatibility.
@@ -104,19 +104,22 @@ historical 90/10 artifacts.
 
 ```bash
 # 1. Fresh 70/15/15 English reconstruction data and train-only BPE.
-python data_perprocess/preprocess_text_mu_bpe.py \
-  --data-dir /data/europarl/json \
+uv run python data_perprocess/preprocess_text_mu_bpe.py \
+  --data-dir data/europarl/json \
   --en-en-file en_en.json \
-  --output-dir data/train/europarl_bpe/2026-publication-v1 \
-  --train-ratio 0.70 --val-ratio 0.15 --seed 48 \
-  --vocab-size 96000 --force-retrain-tokenizer
+  --output-dir data/train/europarl_bpe/2026-publication-v2 \
+  --train-ratio 0.70 --val-ratio 0.15 --seed 42 \
+  --min-len 2 --max-len 96 \
+  --vocab-size 32000 --force-retrain-tokenizer
 
 # 2. Fresh Teacher; selected by validation cross-entropy.
-python main_multi_vocab.py \
-  --data-dir data/train/europarl_bpe/2026-publication-v1 \
+nohup uv run python main_multi_vocab.py \
+  --data-dir data/train/europarl_bpe/2026-publication-v2 \
   --vocab-file vocab_bpe.json \
   --checkpoint-path results/article_kd/training \
-  --experiment-id teacher-seed42 --seed 42
+  --batch-size 32 --MAX-LENGTH 99 --MIN-LENGTH 2 \
+  --experiment-id teacher-v2-bpe32k-seed42 --seed 42 --weight-decay 0 \
+  > ./results/article_kd/training/teacher-v2-bpe32k-seed42_logs.txt 2>&1 & 
 
 # 3. Matched CE-only Student with a fresh seeded initialization.
 python train_multi_vocab_one_student.py \
