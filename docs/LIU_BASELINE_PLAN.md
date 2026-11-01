@@ -1,11 +1,11 @@
 # Liu-based receiver adaptation — implementation plan
 
 **Repository:** `prinako/pecSC`, branch `kd-exp`.
-**Status:** planned; source mapping and feasibility review precede implementation.
+**Status:** receiver-side mapping and `liu_rx_v1` implementation added; CPU synthetic verification only. Matched real-data training and final evaluation remain pending.
 **Imported:** 2026-10-30 from the approved [Prince_SC paper plan](https://github.com/prinako/Prince_SC/blob/9e9743f5b67f6da9465f24940291fe2fd0970b08/docs/PAPER_PLAN.md).
 **Scope:** English receiver-only compression for `Prince_SC`; separate from the shared-TX multi-user paper.
 
-This document makes the approved M3 comparison plan available in the implementation repository. It adds no executable baseline and establishes no new training result. Recheck the latest run manifests and M1 stability before starting new training; the original prerequisites below are not a claim about the current local run status.
+This document makes the approved M3 comparison plan available in the implementation repository. The original imported plan below is followed by the source audit and implementation specification. No real-data M3 training result is established. Recheck the latest run manifests and M1 stability before starting new training; the original prerequisites below are not a claim about the current local run status.
 
 ## External published-method baseline — 2026-10-23
 
@@ -41,18 +41,201 @@ Section V-A identifies M3, its adaptation and all controls. Section V-B adds M3 
 
 A CE-plus-logit-KD variant obtained simply by removing our feature term is a **separate ablation**, not automatically a reproduction/adaptation of Liu's complete method. Published metric values must not be mixed with locally measured results as a controlled numerical comparison.
 
-An end-to-end reproduction of Liu is outside this planned receiver-only baseline; it would require a separately specified system-level experiment. No baseline implementation, training or quantitative result is established by this plan.
+An end-to-end reproduction of Liu is outside this planned receiver-only baseline; it would require a separately specified system-level experiment. The imported plan alone established no implementation or result; the audited receiver-side implementation is specified below, with real-data training and quantitative claims still pending.
 
 
 ## Local completion checklist
 
 - [ ] Verify current Teacher/data identities and M1 stability from local manifests/logs.
-- [ ] Add a source-to-code mapping with precise source equation/algorithm references and an explicit receiver-side feasibility decision.
+- [x] Add a source-to-code mapping with precise source equation/algorithm references and an explicit receiver-side feasibility decision (see audit below).
 - [ ] Specify all adaptation differences and method-specific validation tuning before implementation/training.
-- [ ] Implement a distinct M3 method/config identifier; do not silently repurpose the existing KD objective.
-- [ ] Check loss mathematics/masking, Student-only gradients, frozen Teacher TX/RX, and reuse of the same noisy channel tensor.
+- [x] Implement a distinct M3 method/config identifier, `liu_rx_v1`; preserve the existing KD objective.
+- [x] Check loss mathematics/masking, Student-only gradients, frozen Teacher TX/RX, and shared noisy channel tensor in CPU synthetic tests (real-run artifact checks remain pending).
 - [ ] Train matched M1/M2/M3 runs with immutable IDs, configs, source revisions and selected checkpoint hashes; preserve validation/test isolation.
 - [ ] Evaluate M0–M3 under one frozen protocol and retain raw predictions, corpus metrics and uncertainty.
 - [ ] Report quality and measured deployment cost with adaptation limitations in the paper.
 
-Use [KD_EXPERIMENT_PLAN.md](KD_EXPERIMENT_PLAN.md) for the overall execution sequence. The source-to-code mapping and M3 command are deliberately not invented here; add them after the primary-method audit and implementation are complete.
+Use [KD_EXPERIMENT_PLAN.md](KD_EXPERIMENT_PLAN.md) for the overall execution sequence. The audit and a command template below specify the implemented adaptation; hyperparameters and a matched real-data training protocol still require a declared validation-only selection procedure.
+
+## Primary-source audit and receiver-side specification — 2026-10-31
+
+### Source identity and limits
+
+Reviewed the published IEEE TWC version, vol. 23, no. 7, pp. 7000–7012,
+DOI `10.1109/TWC.2023.3336941`. The supplied 13-page PDF has SHA-256
+`951db1bb6490beee689e6fce1f57212b5630261aed801a9c8fefdcdb567a85e5`.
+Equations and Table I were checked visually, in addition to text extraction.
+The licensed PDF is not committed to this repository.
+
+No verified official author implementation was located in the title/author/arXiv-ID
+searches performed for this audit. This is a search limitation, not a claim that
+author code does not exist. The inspected paper does not supply a complete numeric
+recipe for temperature, individual distillation weights, LR, batch size, training
+epochs and transfer-set size. Do not invent these as recovered author settings.
+
+### What the published method specifies
+
+- Eqs. (25)–(27), printed p. 7005: temperature-softmax and KL over a selected
+  subset of semantic-encoder `p`, channel-encoder `x`, channel-decoder `p_hat`,
+  semantic-decoder `t_hat`, and prediction `s_hat` outputs. The printed KL order
+  is **Student || Teacher**, scaled by `T^2`.
+- Eq. (28), p. 7005: hard-label CE coefficient is `1 - sum(eta)`; add each
+  `eta * T^2 * KL(Student || Teacher)`. This is not our current forward-KL plus
+  decoder cosine objective.
+- Table I, p. 7008: Teacher/Student 1 have four semantic encoder/decoder layers,
+  eight heads and width 128. Student 2 reduces both semantic sides to two layers.
+  Students 1–2 transfer `x`, `t_hat`, and `s_hat`. Students 3–4 additionally
+  transfer `p` and `p_hat`, with further channel-layer reduction. Only Student 4
+  uses post-training dynamic quantization.
+- Algorithms 1–4, pp. 7006–7007: train the full Teacher, train a full Student
+  transceiver on a constrained transfer set, and optionally quantize. Teacher
+  training includes MU interference; Student transfer training omits it.
+  Our receiver-only experiment does not reproduce that robustness setting.
+
+There are two source ambiguities. The prose below Table I says semantic-encoder
+outputs where the table lists semantic-decoder outputs for Students 1–2. This
+adaptation explicitly follows **Table I**. Also, Eq. (9) defines prediction
+`s_hat` after softmax, whereas the discussion of soft targets refers to logits.
+We explicitly use **pre-softmax prediction logits** as input to Eq. (25), rather
+than silently applying a second softmax to probabilities. This interpretation
+is an adaptation choice; it is not established by verified author code.
+
+### Feasibility decision and signal mapping
+
+**Feasible as a partial receiver-side adaptation inspired by Table-I Student 2;
+not an exact reproduction.** Our label `M3` is an experiment label, not the
+paper's `Student 3`. Keep our common four-layer/eight-head receiver, width 128,
+FFN 512 and 32k BPE. The source's end-to-end four-to-two layer compression is
+not reproduced.
+
+| Source component | pecSC tensor/location | Decision |
+|---|---|---|
+| `p`, semantic-encoder output | `Transmitter.encoder` output | Not in the selected Table-I signal subset; shared frozen TX has no trainable Student encoder |
+| `x`, channel-encoder output | Shared `Transmitter.channel_encoder` output | Omit: both receivers share the exact TX; this term supplies no receiver gradient |
+| `p_hat`, channel-decoder output | Second return from `Student` / `Receiver` | Exclude from this variant; adding it would be a separately identified extension |
+| `t_hat`, semantic-decoder output | Third return from `Student` / `Receiver` | Retain; temperature-softmax over the final feature axis |
+| `s_hat`, prediction transfer | First return, pre-softmax vocabulary logits | Retain; explicitly declared logit interpretation of the prediction signal |
+
+Omitting `x` and retaining two receiver terms changes the weighting problem. No
+omitted source weight is implicitly redistributed; select the two retained weights
+on validation and compute the CE coefficient from their sum.
+
+### Exact implemented objective: `liu_rx_v1`
+
+For `Q_T(u) = softmax(u/T, dim=-1)`, define
+
+```text
+D(uS,uT) = T^2 * mean_valid_tokens sum_final_axis
+           Q_T(uS) * (log Q_T(uS) - log Q_T(stop_gradient(uT)))
+
+L = (1 - eta_decoder - eta_logit) * CE_smoothed_0.1
+    + eta_decoder * D(student_decoder, teacher_decoder)
+    + eta_logit   * D(student_logits, teacher_logits)
+```
+
+`utils/liu_kd.py:student_teacher_kl` implements the stable log-softmax calculation.
+`train_multi_vocab_one_student.py:distillation_terms` selects it only for
+`--method liu_rx_v1`. The default `receiver_kd` retains the existing
+Teacher||Student KL and normalized decoder cosine-squared feature loss.
+
+- Both retained eta values must be explicit, finite and positive; their sum must
+  be below one. The CLI rejects legacy alpha/beta/gamma flags with M3 rather than
+  ignoring them. Temperature must be finite and positive. Its CLI default of 2
+  is our configuration default, not an author-recovered value.
+- Exclude PAD rows before softmax; sum along features/vocabulary and average
+  across valid shifted target positions. An all-PAD tensor gives differentiable
+  zero. START is input-only; EN and EOS targets contribute as in our other arms.
+- Use final decoder outputs, not layer-by-layer matching. No feature cosine loss
+  or additional channel-decoder term is used in M3.
+- Preserve smoothed causal teacher-forced CE (`0.1`) for matched local controls.
+  This differs from an exact reproduction of the source's hard-label/masked-word
+  description. Explicit axis choice and PAD/token normalization are local
+  implementation specifications not fully resolved by the source.
+- Teacher TX and RX stay frozen and in eval mode. Both receivers process the same
+  received tensor. Only the Student receiver is optimized. No Teacher retraining,
+  MU-interference generator, quantization or new decoding procedure is added.
+- Checkpoint selection remains minimum batch-mean smoothed validation CE.
+  Unsmoothed token-weighted NLL and `exp(NLL)` are additional reporting metrics.
+
+Manifests and checkpoint metadata contain the method ID, effective coefficients,
+KL direction and alignment definition. Numeric CSV fields retain the shared schema:
+`kd` is raw output KL; `tf` is raw decoder KL for M3 (cosine loss for the legacy
+method); alpha/beta/gamma are the effective CE/output/decoder weights. Compare CE
+across methods; raw auxiliary terms have different definitions.
+
+### Normalization, tuning and real-run gates
+
+The implementation target is current `batch_unit_rms_v1`: batch-wide RMS scaling
+using `clamp_min(1e-12)` before the square root; padding participates. This is
+recorded in every new Student manifest, with SHA-256 identities of relevant code.
+The change already present in commit `12bc092` differs from historical conditional
+RMS capping. It does not update or validate historical results retroactively.
+
+Before launching real training, freeze one normalization convention for **all**
+matched arms and the selected Teacher deployment. Do not compare newly trained
+M3 under unit-RMS against historical M1/M2 under the cap as a loss-only ablation.
+The Teacher weights were trained under the historical convention; changing its
+runtime TX normalization must be declared and evaluated consistently. Historical
+reproduction uses its original code. No normalization choice is silently patched
+by this implementation and no real training is launched here.
+
+Keep identical data/Teacher identities, initialization policy/seeds, architecture,
+optimizer, batch size, order, SNR schedule and epoch budget across candidate arms.
+Declare a validation-only tuning grid and equal trial budget before selecting
+eta/temperature. Keep test unopened. Artifact verification and a real-data M1
+stability check remain local gates, even though historical CSV evidence exists.
+
+### Command template — requires explicitly chosen validation candidate
+
+From the pecSC root, set `ETA_DECODER`, `ETA_LOGIT`, `KD_TEMPERATURE` and a new
+`RUN_ID` as environment variables. No production values are supplied by this plan.
+This command uses the recorded data/Teacher locations and matched training settings;
+it is a recipe, not evidence that a run occurred or that normalization is frozen.
+
+```bash
+uv run python train_multi_vocab_one_student.py \
+  --method liu_rx_v1 \
+  --liu-decoder-weight "${ETA_DECODER:?Set a validation candidate}" \
+  --liu-logit-weight "${ETA_LOGIT:?Set a validation candidate}" \
+  --temperature "${KD_TEMPERATURE:?Set a validation candidate}" \
+  --data-dir data/train/europarl_bpe/2026-publication-v1 \
+  --vocab-file vocab_bpe.json \
+  --teacher-encoder results/article_kd/training/teacher-bpe32k-seed42/encoder_38.pth \
+  --teacher-decoder results/article_kd/training/teacher-bpe32k-seed42/decoder_38.pth \
+  --save-dir results/article_kd/diagnostics \
+  --experiment-id "${RUN_ID:?Choose a fresh immutable run ID}" \
+  --seed 42 --student_num_layers 4 --student_num_heads 8 \
+  --num-layers 8 --num-heads 16 --max-len 67 --d-model 128 --dff 512 \
+  --channel Rayleigh --snr-mode range --snr-db-low 0 --snr-db-high 20 \
+  --val-snr-db 8 --batch-size 32 --epochs 10 --lr 1e-4 \
+  --weight-decay 0 --dropout 0.1 --grad-clip 1 --diagnostic-mode
+```
+
+### Verification and remaining work
+
+Focused tests in `tests/test_liu_kd.py` cover independent KL arithmetic/direction,
+Teacher detach, PAD invariance, valid-token averaging, invalid weights/temperature,
+shape checks, shared received tensors, frozen Teacher parameters and Student updates.
+The publication pipeline test also runs one tiny synthetic CLI epoch with no test
+pickle, then verifies selected-checkpoint identity, method metadata and NLL/perplexity.
+These are implementation checks, not publication experiments.
+
+Run the checks with the project environment:
+
+```bash
+uv run pytest -q tests/test_liu_kd.py tests/test_publication_pipeline.py \
+  tests/test_student_diagnostics.py tests/test_paired_validation.py
+```
+
+Remaining: decide/freeze normalization and validation tuning budget; verify local
+data/Teacher artifacts; train matched arms; extend the current M1-vs-feature paired
+evaluator to include M3 under the frozen protocol; finalize autoregressive corpus
+evaluation and deployment benchmarks. Current notebooks and paired scripts do not
+automatically establish an M3 comparison. No quality, significance or latency claim
+is made by adding this implementation.
+
+
+Verification recorded for this implementation: 56 focused tests passed on CPU
+with PyTorch 2.15.0+cpu, including the tiny one-epoch CLI run. This inspection
+runtime differs from the historical 2.13.0+cu130 training runtime; no GPU or
+full-corpus run was performed.

@@ -8,6 +8,7 @@ from dataset_multilingual import EurParallelDatasetBPE, collate_parallelBPE
 from dataset import EurDataset, collate_data
 
 from datetime import datetime
+from pathlib import Path
 import argparse
 import csv
 import json
@@ -46,6 +47,7 @@ from utils.experiment_manifest import (
     update_selected_checkpoint, write_manifest,
 )
 from utils.publication_data import resolve_training_inputs
+from utils.liu_kd import METHOD_ID, student_teacher_kl, validate_liu_weights
 
 
 
@@ -115,10 +117,13 @@ def parse_args():
     )
 
     # KD
+    parser.add_argument("--method", choices=["receiver_kd", METHOD_ID], default="receiver_kd")
+    parser.add_argument("--liu-decoder-weight", type=float)
+    parser.add_argument("--liu-logit-weight", type=float)
     parser.add_argument("--temperature", type=float, default=2.0)
-    parser.add_argument("--alpha", type=float, default=0.6, help="CE weight")
-    parser.add_argument("--beta", type=float, default=0.3, help="KD weight")
-    parser.add_argument("--gamma", type=float, default=0.1, help="Feature MSE weight")
+    parser.add_argument("--alpha", type=float, default=None, help="Legacy CE weight (default 0.6)")
+    parser.add_argument("--beta", type=float, default=None, help="Legacy output KL weight (default 0.3)")
+    parser.add_argument("--gamma", type=float, default=None, help="Legacy decoder cosine weight (default 0.1)")
     parser.add_argument("--init-student-from-teacher", action="store_true")
     parser.add_argument('--en', default='en_en', type=str)
     parser.add_argument('--en-pt', default='en_pt', type=str)
@@ -144,6 +149,63 @@ def validate_loss_configuration(alpha: float, beta: float, gamma: float, tempera
         raise ValueError("temperature must be positive")
     
     return "CE-only Student" if beta == 0 and gamma == 0 else "KD Student"
+
+
+def configure_objective(args):
+    """Resolve the method before loading data; never silently ignore loss flags."""
+    method = getattr(args, "method", "receiver_kd")
+    if method == METHOD_ID:
+        if any(getattr(args, key, None) is not None for key in ("alpha", "beta", "gamma")):
+            raise ValueError("Use --liu-decoder-weight/--liu-logit-weight, not --alpha/--beta/--gamma, for liu_rx_v1")
+        args.alpha = validate_liu_weights(
+            args.liu_decoder_weight, args.liu_logit_weight, args.temperature
+        )
+        args.beta = args.liu_logit_weight
+        args.gamma = args.liu_decoder_weight
+        return "Liu et al. receiver-side adaptation"
+    if method != "receiver_kd":
+        raise ValueError(f"Unknown method: {method}")
+    if any(getattr(args, key, None) is not None for key in ("liu_decoder_weight", "liu_logit_weight")):
+        raise ValueError("Liu weights require --method liu_rx_v1")
+    for key, default in (("alpha", 0.6), ("beta", 0.3), ("gamma", 0.1)):
+        if getattr(args, key, None) is None:
+            setattr(args, key, default)
+    return validate_loss_configuration(args.alpha, args.beta, args.gamma, args.temperature)
+
+
+def distillation_terms(s_logits, t_logits, s_decoder, t_decoder, targets, pad_idx, args):
+    """Share one loss implementation between train and validation."""
+    zero = s_logits.new_zeros(())
+    if getattr(args, "method", "receiver_kd") == METHOD_ID:
+        return (
+            student_teacher_kl(s_logits, t_logits, targets, pad_idx, args.temperature),
+            student_teacher_kl(s_decoder, t_decoder, targets, pad_idx, args.temperature),
+        )
+    kd = (kd_kl_loss(s_logits, t_logits, targets, pad_idx, args.temperature)
+          if args.beta > 0 else zero)
+    feat = (feature_distillation_loss_cosine_normalized(
+        student_feat=s_decoder, teacher_feat=t_decoder.detach(),
+        targets=targets, pad_idx=pad_idx, eps=1e-8
+    ) if args.gamma > 0 else zero)
+    return kd, feat
+
+
+def objective_manifest(args):
+    liu = getattr(args, "method", "receiver_kd") == METHOD_ID
+    return {
+        "method": getattr(args, "method", "receiver_kd"),
+        "alpha": args.alpha, "beta": args.beta, "gamma": args.gamma,
+        "temperature": args.temperature, "label_smoothing": 0.1,
+        "kl_direction": "student||teacher" if liu else "teacher||student",
+        "feature_alignment": "temperature-softmax decoder KL student||teacher" if liu else "normalized decoder cosine squared",
+        "distillation_reduction": "sum final axis; mean non-PAD shifted target tokens",
+        "logit_temperature_squared": True,
+        "feature_temperature_squared": liu,
+        **({"source": "10.1109/TWC.2023.3336941; Table I Student 2; Eqs. 25-28",
+            "adaptation": "frozen shared TX; decoder/output transfer only; smoothed causal CE",
+            "liu_decoder_weight": args.liu_decoder_weight,
+            "liu_logit_weight": args.liu_logit_weight} if liu else {}),
+    }
 
 
 def load_teacher_checkpoints(model, encoder_path, decoder_path, device, expected_architecture=None):
@@ -747,6 +809,7 @@ def validate_epoch(
                 noise_std,
             )
 
+            t_logits = t_rx_dec = None
             if args.beta > 0 or args.gamma > 0:
                 t_logits, _, t_rx_dec = teacher(
                     z_noisy=z_noisy,
@@ -770,28 +833,8 @@ def validate_epoch(
                 label_smoothing=0.1,
             )
 
-            kd = (
-                kd_kl_loss(
-                    s_logits,
-                    t_logits,
-                    trg_real,
-                    pad_idx,
-                    args.temperature,
-                )
-                if args.beta > 0
-                else ce.new_zeros(())
-            )
-
-            feat = (
-                feature_distillation_loss_cosine_normalized(
-                    student_feat=s_dec_out,
-                    teacher_feat=t_rx_dec.detach(),
-                    targets=trg_real,
-                    pad_idx=pad_idx,
-                    eps=1e-8,
-                )
-                if args.gamma > 0
-                else ce.new_zeros(())
+            kd, feat = distillation_terms(
+                s_logits, t_logits, s_dec_out, t_rx_dec, trg_real, pad_idx, args
             )
 
             weighted_ce = args.alpha * ce
@@ -918,6 +961,7 @@ def train(
             else:
                 _, _, _, z_noisy, channel_metadata = tx_result
 
+            t_logits = t_rx_dec = None
             if args.beta > 0 or args.gamma > 0:
                 t_logits, _, t_rx_dec = teacher(
                     z_noisy=z_noisy,
@@ -941,28 +985,8 @@ def train(
             label_smoothing=0.1,
         )
 
-        kd = (
-            kd_kl_loss(
-                s_logits,
-                t_logits,
-                trg_real,
-                pad_idx,
-                args.temperature,
-            )
-            if args.beta > 0
-            else ce.new_zeros(())
-        )
-
-        feat = (
-            feature_distillation_loss_cosine_normalized(
-                student_feat=s_dec_out,
-                teacher_feat=t_rx_dec.detach(),
-                targets=trg_real,
-                pad_idx=pad_idx,
-                eps=1e-8,
-            )
-            if args.gamma > 0
-            else ce.new_zeros(())
+        kd, feat = distillation_terms(
+            s_logits, t_logits, s_dec_out, t_rx_dec, trg_real, pad_idx, args
         )
 
         weighted_ce = args.alpha * ce
@@ -1053,9 +1077,7 @@ def train(
 
 def main():
     args = parse_args()
-    model_type = validate_loss_configuration(
-        args.alpha, args.beta, args.gamma, args.temperature
-    )
+    model_type = configure_objective(args)
     if args.init_student_from_teacher:
         raise ValueError(
             "--init-student-from-teacher is not implemented; publication Students use fresh initialization"
@@ -1189,12 +1211,15 @@ def main():
         "channel": {"model": args.channel, "train_snr_mode": args.snr_mode,
                     "train_snr_db": args.snr_db, "train_snr_db_low": args.snr_db_low,
                     "train_snr_db_high": args.snr_db_high,
-                    "validation_snr_db": args.val_snr_db},
+                    "validation_snr_db": args.val_snr_db,
+                    "normalization": "batch_unit_rms_v1"},
         "optimizer": {"name": "Adam", "lr": args.lr, "betas": [0.9, 0.98],
                       "eps": 1e-8, "weight_decay": args.weight_decay},
-        "loss": {"alpha": args.alpha, "beta": args.beta, "gamma": args.gamma,
-                 "temperature": args.temperature, "label_smoothing": 0.1,
-                 "feature_alignment": "normalized decoder cosine squared"},
+        "implementation_files": {name: file_identity(Path(__file__).resolve().parent / name) for name in (
+            "train_multi_vocab_one_student.py", "utils/liu_kd.py", "utils/kd_utils.py",
+            "utils/model_utils.py", "models/transceiver.py", "models/tx_model.py", "student.py")},
+        "method": args.method,
+        "loss": objective_manifest(args),
         "batch_size": args.batch_size, "epoch_budget": args.epochs,
         "checkpoint_selection_rule": "minimum validation cross-entropy",
         "diagnostics": {
@@ -1276,6 +1301,8 @@ def main():
             student,
             latest_path,
             meta={
+                "method": args.method,
+                "loss_configuration": objective_manifest(args),
                 "epoch": epoch + 1,
                 "val_loss": val_stats["loss"],
                 "temperature": args.temperature,
@@ -1299,6 +1326,8 @@ def main():
                 student,
                 best_path,
                 meta={
+                    "method": args.method,
+                    "loss_configuration": objective_manifest(args),
                     "epoch": epoch + 1,
                     "val_loss": val_stats["loss"],
                     "val_ce": val_stats["ce"],
@@ -1318,3 +1347,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

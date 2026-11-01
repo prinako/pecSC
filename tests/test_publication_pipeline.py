@@ -1,4 +1,5 @@
 import json
+import math
 import pickle
 import shutil
 import subprocess
@@ -27,8 +28,6 @@ from models.transceiver import DeepSC
 from models.rx_model import Receiver
 from models.tx_model import Transmitter
 from train_multi_vocab_one_student import (
-    STUDENT_NUM_HEADS,
-    STUDENT_NUM_LAYERS,
     build_student_receiver,
     configure_trainability,
     load_teacher_checkpoints,
@@ -284,7 +283,7 @@ def test_teacher_checkpoint_round_trip_freezing_and_student_forward(tmp_path):
 
     transmitter = Transmitter(loaded.encoder, loaded.channel_encoder)
     receiver = Receiver(loaded.channel_decoder, loaded.decoder, loaded.dense)
-    args = SimpleNamespace(max_len=8, d_model=8, dff=16, dropout=0.0)
+    args = SimpleNamespace(max_len=8, d_model=8, dff=16, dropout=0.0, student_num_layers=4, student_num_heads=8)
     setup_seed(42)
     student = build_student_receiver(12, args, torch.device("cpu"))
     configure_trainability(transmitter, receiver, student)
@@ -316,18 +315,56 @@ def test_teacher_freezing_and_student_trainability():
 
 
 def test_ce_and_kd_students_have_identical_seeded_initialization():
-    args = SimpleNamespace(max_len=8, d_model=8, dff=16, dropout=0.0)
+    args = SimpleNamespace(max_len=8, d_model=8, dff=16, dropout=0.0, student_num_layers=4, student_num_heads=8)
     setup_seed(42)
     ce_student = build_student_receiver(12, args, torch.device("cpu"))
     setup_seed(42)
     kd_student = build_student_receiver(12, args, torch.device("cpu"))
-    assert STUDENT_NUM_LAYERS == 4
-    assert STUDENT_NUM_HEADS == 8
+    assert len(ce_student.decoder.dec_layers) == 4
+    assert ce_student.decoder.dec_layers[0].self_mha.num_heads == 8
     assert ce_student.state_dict().keys() == kd_student.state_dict().keys()
     assert all(
         torch.equal(ce_student.state_dict()[name], kd_student.state_dict()[name])
         for name in ce_student.state_dict()
     )
+
+
+def test_liu_cli_synthetic_run_records_method_and_selected_artifacts(tmp_path, synthetic_publication_data):
+    data = tmp_path / "data"
+    shutil.copytree(synthetic_publication_data, data)
+    (data / "test_en_en.pkl").unlink()
+    vocab_size = json.loads((data / "vocab_bpe.json").read_text())["vocab_size"]
+    teacher = DeepSC(1, vocab_size, vocab_size, 35, 35, 8, 2, 16, 0.0)
+    encoder, decoder = save_model(teacher, str(tmp_path), epoch=0, metadata={
+        "experiment_id": "synthetic", "epoch": 1,
+        "architecture": dict(num_layers=1, num_heads=2, d_model=8,
+                             dff=16, max_len=35, vocab_size=vocab_size),
+    })
+    subprocess.run([
+        sys.executable, "train_multi_vocab_one_student.py", "--method", "liu_rx_v1",
+        "--liu-decoder-weight", ".1", "--liu-logit-weight", ".2",
+        "--data-dir", str(data), "--teacher-encoder", encoder,
+        "--teacher-decoder", decoder, "--save-dir", str(tmp_path / "runs"),
+        "--experiment-id", "m3-smoke", "--epochs", "1", "--batch-size", "8",
+        "--num-layers", "1", "--num-heads", "2", "--d-model", "8", "--dff", "16",
+        "--max-len", "35", "--dropout", "0", "--channel", "AWGN", "--snr-mode", "fixed",
+    ], check=True, cwd=Path(__file__).parents[1], capture_output=True, text=True)
+    run = tmp_path / "runs" / "m3-smoke"
+    manifest = json.loads((run / "manifest.json").read_text())
+    assert manifest["method"] == "liu_rx_v1"
+    assert manifest["architecture"]["student_layers"] == 4
+    assert manifest["architecture"]["student_heads"] == 8
+    assert manifest["channel"]["normalization"] == "batch_unit_rms_v1"
+    assert manifest["loss"]["kl_direction"] == "student||teacher"
+    assert manifest["loss"]["alpha"] == pytest.approx(.7)
+    assert "utils/liu_kd.py" in manifest["implementation_files"]
+    assert manifest["selected_checkpoint"]["selection_metric"] == "validation_cross_entropy"
+    checkpoint = torch.load(run / "student_best.pth", map_location="cpu", weights_only=True)
+    assert checkpoint["meta"]["method"] == "liu_rx_v1"
+    assert checkpoint["meta"]["loss_configuration"] == manifest["loss"]
+    frame = pd.read_csv(run / "training.csv")
+    assert frame.loc[0, "val_ce"] == pytest.approx(manifest["selected_checkpoint"]["selection_value"])
+    assert frame.loc[0, "val_perplexity"] == pytest.approx(math.exp(frame.loc[0, "val_nll"]))
 
 
 def test_ce_only_configuration():
@@ -361,7 +398,7 @@ def tiny_receiver_pipeline():
     teacher = tiny_teacher()
     transmitter = Transmitter(teacher.encoder, teacher.channel_encoder)
     receiver = Receiver(teacher.channel_decoder, teacher.decoder, teacher.dense)
-    model_args = SimpleNamespace(max_len=8, d_model=8, dff=16, dropout=0.0)
+    model_args = SimpleNamespace(max_len=8, d_model=8, dff=16, dropout=0.0, student_num_layers=4, student_num_heads=8)
     setup_seed(42)
     student = build_student_receiver(12, model_args, torch.device("cpu"))
     configure_trainability(transmitter, receiver, student)
@@ -464,3 +501,4 @@ def test_manifest_serialization_and_no_overwrite(tmp_path):
     assert json.loads(output.read_text())["selected"] is None
     with pytest.raises(FileExistsError):
         write_manifest(output, {})
+
