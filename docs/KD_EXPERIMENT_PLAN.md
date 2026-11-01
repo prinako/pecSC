@@ -122,13 +122,15 @@ nohup uv run python main_multi_vocab.py \
   > ./results/article_kd/training/teacher-v2-bpe32k-seed42_logs.txt 2>&1 & 
 
 # 3. Matched CE-only Student with a fresh seeded initialization.
-python train_multi_vocab_one_student.py \
-  --data-dir data/train/europarl_bpe/2026-publication-v1 \
+mkdir ./results/article_kd/training/student-bpe32k-kd_only-seed42 && nohup uv run python train_multi_vocab_one_student.py \
+  --data-dir data/train/europarl_bpe/2026-publication-v2 \
   --vocab-file vocab_bpe.json \
-  --teacher-encoder results/article_kd/training/teacher-seed42/encoder_NN.pth \
-  --teacher-decoder results/article_kd/training/teacher-seed42/decoder_NN.pth \
+  --teacher-encoder results/article_kd/training/teacher-v2-bpe32k-seed42/encoder_37.pth \
+  --teacher-decoder results/article_kd/training/teacher-v2-bpe32k-seed42/decoder_37.pth \
   --save-dir results/article_kd/training --experiment-id student-ce-seed42 \
-  --seed 42 --alpha 1.0 --beta 0.0 --gamma 0.0 --temperature 2.0
+  --epochs 50 --batch-size 32 --max-len 99 --weight-decay 0 \
+  --seed 42 --alpha 0.0 --beta 1.0 --gamma 0.0 --temperature 2.0 \
+  > ./results/article_kd/training/student-ce-seed42/logs.txt 2>&1 &
 
 # 4. Matched KD Student. Keep every non-loss argument identical to CE-only.
 python train_multi_vocab_one_student.py \

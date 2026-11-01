@@ -70,7 +70,7 @@ def create_run_directory(base_dir: str | Path, experiment_id: str) -> Path:
     ):
         raise ValueError("experiment_id must be a non-empty safe path component")
     run_dir = Path(base_dir).expanduser().resolve() / experiment_id
-    run_dir.mkdir(parents=True, exist_ok=False)
+    run_dir.mkdir(parents=True, exist_ok=True)
     return run_dir
 
 
