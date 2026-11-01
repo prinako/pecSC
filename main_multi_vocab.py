@@ -337,7 +337,7 @@ def main():
                     "train_snr_db_high": args.snr_db_high,
                     "validation_snr_db": args.val_snr_db},
         "optimizer": {"name": "Adam", "lr": args.lr, "betas": [0.9, 0.98],
-                      "eps": 1e-8, "weight_decay": args.weights_only},
+                      "eps": 1e-8, "weight_decay":  args.weight_decay},
         "batch_size": args.batch_size, "epoch_budget": args.epochs,
         "checkpoint_selection_rule": "minimum validation cross-entropy",
     })
