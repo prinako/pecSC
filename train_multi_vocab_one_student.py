@@ -1176,10 +1176,11 @@ def main():
     )
     manifest.update({
         "architecture": {"teacher_layers": args.num_layers, "teacher_heads": args.num_heads,
-                         "student_layers": STUDENT_NUM_LAYERS,
-                         "student_heads": STUDENT_NUM_HEADS, "d_model": args.d_model,
+                         "student_layers": args.student_num_layers,
+                         "student_heads": args.student_num_heads, "d_model": args.d_model,
                          "dff": args.dff, "max_length": args.max_len,
-                         "vocab_size": num_vocab, "student_initialization": "fresh seeded initialization"},
+                         "vocab_size": num_vocab, "student_initialization": "fresh seeded initialization"
+                        },
         "dataset": {name: file_identity(path) for name, path in dataset_files.items()},
         "tokenizer_vocab": file_identity(args.vocab_file),
         "teacher_checkpoints": {"encoder": file_identity(teacher_paths[0]),
