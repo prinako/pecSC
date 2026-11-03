@@ -1314,8 +1314,8 @@ def main():
         )
 
         # save the best student model        
-        if val_stats["ce"] < best_val:
-            best_val = val_stats["ce"]
+        if val_stats["loss"] < best_val:
+            best_val = val_stats["loss"]
 
             best_path = os.path.join(
                 root_dir,
