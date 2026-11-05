@@ -27,8 +27,6 @@ from models.transceiver import DeepSC
 from models.rx_model import Receiver
 from models.tx_model import Transmitter
 from train_multi_vocab_one_student import (
-    STUDENT_NUM_HEADS,
-    STUDENT_NUM_LAYERS,
     build_student_receiver,
     configure_trainability,
     load_teacher_checkpoints,
@@ -284,7 +282,8 @@ def test_teacher_checkpoint_round_trip_freezing_and_student_forward(tmp_path):
 
     transmitter = Transmitter(loaded.encoder, loaded.channel_encoder)
     receiver = Receiver(loaded.channel_decoder, loaded.decoder, loaded.dense)
-    args = SimpleNamespace(max_len=8, d_model=8, dff=16, dropout=0.0)
+    args = SimpleNamespace(max_len=8, d_model=8, dff=16, dropout=0.0,
+                           student_num_layers=4, student_num_heads=8)
     setup_seed(42)
     student = build_student_receiver(12, args, torch.device("cpu"))
     configure_trainability(transmitter, receiver, student)
@@ -316,13 +315,12 @@ def test_teacher_freezing_and_student_trainability():
 
 
 def test_ce_and_kd_students_have_identical_seeded_initialization():
-    args = SimpleNamespace(max_len=8, d_model=8, dff=16, dropout=0.0)
+    args = SimpleNamespace(max_len=8, d_model=8, dff=16, dropout=0.0,
+                           student_num_layers=4, student_num_heads=8)
     setup_seed(42)
     ce_student = build_student_receiver(12, args, torch.device("cpu"))
     setup_seed(42)
     kd_student = build_student_receiver(12, args, torch.device("cpu"))
-    assert STUDENT_NUM_LAYERS == 4
-    assert STUDENT_NUM_HEADS == 8
     assert ce_student.state_dict().keys() == kd_student.state_dict().keys()
     assert all(
         torch.equal(ce_student.state_dict()[name], kd_student.state_dict()[name])
@@ -361,7 +359,8 @@ def tiny_receiver_pipeline():
     teacher = tiny_teacher()
     transmitter = Transmitter(teacher.encoder, teacher.channel_encoder)
     receiver = Receiver(teacher.channel_decoder, teacher.decoder, teacher.dense)
-    model_args = SimpleNamespace(max_len=8, d_model=8, dff=16, dropout=0.0)
+    model_args = SimpleNamespace(max_len=8, d_model=8, dff=16, dropout=0.0,
+                           student_num_layers=4, student_num_heads=8)
     setup_seed(42)
     student = build_student_receiver(12, model_args, torch.device("cpu"))
     configure_trainability(transmitter, receiver, student)

@@ -13,8 +13,6 @@ from models.transceiver import DeepSC
 from models.tx_model import Transmitter
 from train_multi_vocab_one_student import (
     DiagnosticCSVLogger,
-    STUDENT_NUM_HEADS,
-    STUDENT_NUM_LAYERS,
     build_student_receiver,
     configure_trainability,
     setup_seed,
@@ -44,7 +42,8 @@ def _pipeline(seed=42):
     teacher = Receiver(
         teacher_model.channel_decoder, teacher_model.decoder, teacher_model.dense
     )
-    model_args = SimpleNamespace(max_len=8, d_model=8, dff=16, dropout=0.0)
+    model_args = SimpleNamespace(max_len=8, d_model=8, dff=16, dropout=0.0,
+                           student_num_layers=4, student_num_heads=8)
     student = build_student_receiver(12, model_args, torch.device("cpu"))
     configure_trainability(transmitter, teacher, student)
     batches = DataLoader(
@@ -144,8 +143,6 @@ def test_diagnostic_mode_preserves_training_and_all_rng_states(tmp_path, channel
 
 
 def test_controlled_m1_awgn_rayleigh_short_comparison(tmp_path):
-    assert STUDENT_NUM_LAYERS == 4
-    assert STUDENT_NUM_HEADS == 8
 
     results = {}
     for channel in ("AWGN", "Rayleigh"):

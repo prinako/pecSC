@@ -46,13 +46,14 @@ from utils.experiment_manifest import (
     update_selected_checkpoint, write_manifest,
 )
 from utils.publication_data import resolve_training_inputs
+from utils.liu_kd import METHOD_ID, liu_weights, masked_student_teacher_kl
 
 
 
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Receiver-only KD for DeepSC")
+    parser = argparse.ArgumentParser(description="Receiver-only KD for DeepSC", allow_abbrev=False)
 
     # files
     parser.add_argument(
@@ -115,10 +116,17 @@ def parse_args():
     )
 
     # KD
-    parser.add_argument("--temperature", type=float, default=2.0)
+    parser.add_argument("--method", choices=["receiver-kd", "liu-receiver"],
+                        default="receiver-kd", help="Existing CE/KD path or explicit M3 adaptation")
+    parser.add_argument("--liu-eta-decoder", type=float,
+                        help="M3 semantic-decoder distribution weight (validation-selected)")
+    parser.add_argument("--liu-eta-output", type=float,
+                        help="M3 output distribution weight (validation-selected)")
+    parser.add_argument("--temperature", type=float, default=None,
+                        help="Required explicitly for M3; existing CE/KD defaults to 2")
     parser.add_argument("--alpha", type=float, default=0.6, help="CE weight")
     parser.add_argument("--beta", type=float, default=0.3, help="KD weight")
-    parser.add_argument("--gamma", type=float, default=0.1, help="Feature MSE weight")
+    parser.add_argument("--gamma", type=float, default=0.1, help="Decoder cosine feature weight (existing KD only)")
     parser.add_argument("--init-student-from-teacher", action="store_true")
     parser.add_argument('--en', default='en_en', type=str)
     parser.add_argument('--en-pt', default='en_pt', type=str)
@@ -130,7 +138,18 @@ def parse_args():
     parser.add_argument('--pt-es', default='pt_es', type=str)
     parser.add_argument('--pt-fr', default='pt_fr', type=str)
 
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.method == "liu-receiver":
+        # Reject ambiguous legacy weight flags, even when equal to their defaults.
+        import sys
+        if any(arg.split("=", 1)[0] in {"--alpha", "--beta", "--gamma"}
+               for arg in sys.argv[1:]):
+            parser.error("M3 uses --liu-eta-decoder/output, not --alpha/beta/gamma")
+    try:
+        configure_method(args)
+    except ValueError as exc:
+        parser.error(str(exc))
+    return args
 
 
 def validate_loss_configuration(alpha: float, beta: float, gamma: float, temperature: float) -> str:
@@ -144,6 +163,54 @@ def validate_loss_configuration(alpha: float, beta: float, gamma: float, tempera
         raise ValueError("temperature must be positive")
     
     return "CE-only Student" if beta == 0 and gamma == 0 else "KD Student"
+
+
+def configure_method(args):
+    """Resolve effective weights before constructing data, models or run folders."""
+    if args.method == "liu-receiver":
+        args.alpha, args.beta, args.gamma = liu_weights(
+            args.liu_eta_decoder, args.liu_eta_output, args.temperature
+        )
+        return "Liu et al. — receiver-side adaptation"
+    if args.liu_eta_decoder is not None or args.liu_eta_output is not None:
+        raise ValueError("--liu-eta-* requires --method liu-receiver")
+    if args.temperature is None:
+        args.temperature = 2.0
+    return validate_loss_configuration(args.alpha, args.beta, args.gamma, args.temperature)
+
+
+def receiver_loss_terms(s_logits, t_logits, s_features, t_features, targets, pad_idx, args):
+    """One loss dispatch shared by active training and validation."""
+    ce, _ = masked_ce_loss(s_logits, targets, pad_idx, label_smoothing=0.1)
+    zero = ce.new_zeros(())
+    if getattr(args, "method", "receiver-kd") == "liu-receiver":
+        kd = (masked_student_teacher_kl(s_logits, t_logits, targets, pad_idx, args.temperature)
+              if args.beta > 0 else zero)
+        feat = (masked_student_teacher_kl(s_features, t_features, targets, pad_idx, args.temperature)
+                if args.gamma > 0 else zero)
+    else:
+        kd = (kd_kl_loss(s_logits, t_logits, targets, pad_idx, args.temperature)
+              if args.beta > 0 else zero)
+        feat = (feature_distillation_loss_cosine_normalized(
+            student_feat=s_features, teacher_feat=t_features.detach(),
+            targets=targets, pad_idx=pad_idx, eps=1e-8
+        ) if args.gamma > 0 else zero)
+    return ce, kd, feat
+
+
+def loss_manifest(args):
+    m3 = args.method == "liu-receiver"
+    return {
+        "method_id": METHOD_ID if m3 else ("M1_ce_only" if args.beta == args.gamma == 0 else "M2_receiver_kd"),
+        "alpha": args.alpha, "beta": args.beta, "gamma": args.gamma,
+        "temperature": args.temperature, "label_smoothing": 0.1,
+        "kl_direction": "student||teacher" if m3 else "teacher||student",
+        "feature_alignment": "temperature-softmax decoder KL" if m3 else "normalized decoder cosine squared",
+        "distribution_axis": "last (features or vocabulary)",
+        "reduction": "sum distribution axis; mean non-PAD shifted target tokens",
+        "liu_eta_decoder": args.liu_eta_decoder, "liu_eta_output": args.liu_eta_output,
+        "liu_reference": "10.1109/TWC.2023.3336941; Eqs.25-28; Table I Student 2" if m3 else None,
+    }
 
 
 def load_teacher_checkpoints(model, encoder_path, decoder_path, device, expected_architecture=None):
@@ -762,36 +829,10 @@ def validate_epoch(
                 src_mask,
             )
 
-            # Preserve the existing smoothed CE.
-            ce, _ = masked_ce_loss(
-                s_logits,
-                trg_real,
-                pad_idx,
-                label_smoothing=0.1,
-            )
-
-            kd = (
-                kd_kl_loss(
-                    s_logits,
-                    t_logits,
-                    trg_real,
-                    pad_idx,
-                    args.temperature,
-                )
-                if args.beta > 0
-                else ce.new_zeros(())
-            )
-
-            feat = (
-                feature_distillation_loss_cosine_normalized(
-                    student_feat=s_dec_out,
-                    teacher_feat=t_rx_dec.detach(),
-                    targets=trg_real,
-                    pad_idx=pad_idx,
-                    eps=1e-8,
-                )
-                if args.gamma > 0
-                else ce.new_zeros(())
+            ce, kd, feat = receiver_loss_terms(
+                s_logits, t_logits if args.beta > 0 or args.gamma > 0 else None,
+                s_dec_out, t_rx_dec if args.beta > 0 or args.gamma > 0 else None,
+                trg_real, pad_idx, args,
             )
 
             weighted_ce = args.alpha * ce
@@ -933,36 +974,10 @@ def train(
             src_mask,
         )
 
-        # Preserve the existing optimization objective.
-        ce, _ = masked_ce_loss(
-            s_logits,
-            trg_real,
-            pad_idx,
-            label_smoothing=0.1,
-        )
-
-        kd = (
-            kd_kl_loss(
-                s_logits,
-                t_logits,
-                trg_real,
-                pad_idx,
-                args.temperature,
-            )
-            if args.beta > 0
-            else ce.new_zeros(())
-        )
-
-        feat = (
-            feature_distillation_loss_cosine_normalized(
-                student_feat=s_dec_out,
-                teacher_feat=t_rx_dec.detach(),
-                targets=trg_real,
-                pad_idx=pad_idx,
-                eps=1e-8,
-            )
-            if args.gamma > 0
-            else ce.new_zeros(())
+        ce, kd, feat = receiver_loss_terms(
+            s_logits, t_logits if args.beta > 0 or args.gamma > 0 else None,
+            s_dec_out, t_rx_dec if args.beta > 0 or args.gamma > 0 else None,
+            trg_real, pad_idx, args,
         )
 
         weighted_ce = args.alpha * ce
@@ -1053,9 +1068,7 @@ def train(
 
 def main():
     args = parse_args()
-    model_type = validate_loss_configuration(
-        args.alpha, args.beta, args.gamma, args.temperature
-    )
+    model_type = configure_method(args)
     if args.init_student_from_teacher:
         raise ValueError(
             "--init-student-from-teacher is not implemented; publication Students use fresh initialization"
@@ -1189,12 +1202,11 @@ def main():
         "channel": {"model": args.channel, "train_snr_mode": args.snr_mode,
                     "train_snr_db": args.snr_db, "train_snr_db_low": args.snr_db_low,
                     "train_snr_db_high": args.snr_db_high,
-                    "validation_snr_db": args.val_snr_db},
+                    "validation_snr_db": args.val_snr_db,
+                    "power_normalization": "unconditional batch RMS (current PowerNormalize)"},
         "optimizer": {"name": "Adam", "lr": args.lr, "betas": [0.9, 0.98],
                       "eps": 1e-8, "weight_decay": args.weight_decay},
-        "loss": {"alpha": args.alpha, "beta": args.beta, "gamma": args.gamma,
-                 "temperature": args.temperature, "label_smoothing": 0.1,
-                 "feature_alignment": "normalized decoder cosine squared"},
+        "loss": loss_manifest(args),
         "batch_size": args.batch_size, "epoch_budget": args.epochs,
         "checkpoint_selection_rule": "minimum validation cross-entropy",
         "diagnostics": {
@@ -1283,6 +1295,7 @@ def main():
                 "beta": args.beta,
                 "gamma": args.gamma,
                 "channel": args.channel,
+                "loss_configuration": loss_manifest(args),
             },
         )
 
@@ -1307,6 +1320,7 @@ def main():
                     "beta": args.beta,
                     "gamma": args.gamma,
                     "channel": args.channel,
+                    "loss_configuration": loss_manifest(args),
                 },
             )
             update_selected_checkpoint(
