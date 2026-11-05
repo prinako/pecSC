@@ -341,7 +341,7 @@ def test_liu_cli_synthetic_run_records_method_and_selected_artifacts(tmp_path, s
                              dff=16, max_len=35, vocab_size=vocab_size),
     })
     subprocess.run([
-        sys.executable, "train_multi_vocab_one_student.py", "--method", "liu_rx_v1",
+        sys.executable, "train_liu_rx.py",
         "--liu-decoder-weight", ".1", "--liu-logit-weight", ".2",
         "--data-dir", str(data), "--teacher-encoder", encoder,
         "--teacher-decoder", decoder, "--save-dir", str(tmp_path / "runs"),
@@ -357,7 +357,7 @@ def test_liu_cli_synthetic_run_records_method_and_selected_artifacts(tmp_path, s
     assert manifest["channel"]["normalization"] == "batch_unit_rms_v1"
     assert manifest["loss"]["kl_direction"] == "student||teacher"
     assert manifest["loss"]["alpha"] == pytest.approx(.7)
-    assert "utils/liu_kd.py" in manifest["implementation_files"]
+    assert {"train_liu_rx.py", "utils/liu_kd.py"} <= manifest["implementation_files"].keys()
     assert manifest["selected_checkpoint"]["selection_metric"] == "validation_cross_entropy"
     checkpoint = torch.load(run / "student_best.pth", map_location="cpu", weights_only=True)
     assert checkpoint["meta"]["method"] == "liu_rx_v1"

@@ -4,10 +4,10 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from train_multi_vocab_one_student import (
-    configure_objective, distillation_terms, objective_manifest,
+from utils.liu_kd import (
+    METHOD_ID, configure_liu_objective, liu_distillation_terms,
+    liu_objective_manifest, student_teacher_kl, validate_liu_weights,
 )
-from utils.liu_kd import METHOD_ID, student_teacher_kl, validate_liu_weights
 
 
 def liu_args(**updates):
@@ -74,29 +74,23 @@ def test_invalid_weights_rejected(weights):
 
 def test_method_configuration_and_provenance():
     args = liu_args()
-    assert configure_objective(args) == 'Liu et al. receiver-side adaptation'
+    configure_liu_objective(args)
+    assert args.method == METHOD_ID
     assert (args.alpha, args.beta, args.gamma) == pytest.approx((.7, .2, .1))
-    record = objective_manifest(args)
+    record = liu_objective_manifest(args)
     assert record['method'] == METHOD_ID
     assert record['kl_direction'] == 'student||teacher'
     assert record['liu_decoder_weight'] == .1
-    with pytest.raises(ValueError):
-        configure_objective(liu_args(alpha=.6))
-    with pytest.raises(ValueError):
-        configure_objective(liu_args(method='receiver_kd'))
-    legacy = SimpleNamespace(alpha=None, beta=None, gamma=None, temperature=2)
-    configure_objective(legacy)
-    assert (legacy.alpha, legacy.beta, legacy.gamma) == (.6, .3, .1)
 
 
 def test_decoder_and_output_losses_both_send_only_student_gradients():
     args = liu_args()
-    configure_objective(args)
+    configure_liu_objective(args)
     s_output = torch.tensor([[[1., 0., -1.]]], requires_grad=True)
     t_output = torch.zeros_like(s_output, requires_grad=True)
     s_decoder = torch.tensor([[[1., -1.]]], requires_grad=True)
     t_decoder = torch.zeros_like(s_decoder, requires_grad=True)
-    kd, feature = distillation_terms(s_output, t_output, s_decoder, t_decoder,
+    kd, feature = liu_distillation_terms(s_output, t_output, s_decoder, t_decoder,
                                      torch.tensor([[2]]), 0, args)
     (args.beta * kd + args.gamma * feature).backward()
     assert s_output.grad.abs().sum() > 0
@@ -117,7 +111,7 @@ def test_training_shares_received_tensor_and_keeps_teacher_frozen():
     args = liu_args(max_len=8, d_model=8, dff=16, dropout=0.0,
                     student_num_layers=4, student_num_heads=8,
                     snr_mode='fixed', snr_db=8, grad_clip=1)
-    configure_objective(args)
+    configure_liu_objective(args)
     student = build_student_receiver(12, args, torch.device('cpu'))
     configure_trainability(tx, teacher, student)
     before = deepcopy(full.state_dict())
@@ -128,11 +122,11 @@ def test_training_shares_received_tensor_and_keeps_teacher_frozen():
     src = torch.tensor([[1, 4, 5, 2], [1, 4, 6, 2]])
     loader = [(src, src)]
     opt = torch.optim.Adam(student.parameters(), lr=1e-4)
-    train(tx, teacher, student, loader, opt, 0, 'AWGN', torch.device('cpu'), None, 0, args)
+    train(tx, teacher, student, loader, opt, 0, 'AWGN', torch.device('cpu'), None, 0, args, distill=liu_distillation_terms)
     assert observations[0] == observations[1]
     assert all(torch.equal(before[k], value) for k, value in full.state_dict().items())
     assert all(p.grad is None for p in full.parameters())
     assert any(not torch.equal(student_before[k], value) for k, value in student.state_dict().items())
-    stats = validate_epoch(0, tx, teacher, student, loader, 0, 'AWGN', .2, torch.device('cpu'), None, args)
+    stats = validate_epoch(0, tx, teacher, student, loader, 0, 'AWGN', .2, torch.device('cpu'), None, args, distill=liu_distillation_terms)
     assert stats['loss'] == pytest.approx(args.alpha * stats['ce'] + args.beta * stats['kd'] + args.gamma * stats['tf'])
     assert observations[2] == observations[3]

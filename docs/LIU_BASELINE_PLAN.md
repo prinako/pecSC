@@ -134,12 +134,12 @@ L = (1 - eta_decoder - eta_logit) * CE_smoothed_0.1
 ```
 
 `utils/liu_kd.py:student_teacher_kl` implements the stable log-softmax calculation.
-`train_multi_vocab_one_student.py:distillation_terms` selects it only for
-`--method liu_rx_v1`. The default `receiver_kd` retains the existing
+`train_liu_rx.py` owns M3 arguments and calls the common training runner with
+`liu_distillation_terms`. The `receiver_kd` trainer retains the existing
 Teacher||Student KL and normalized decoder cosine-squared feature loss.
 
 - Both retained eta values must be explicit, finite and positive; their sum must
-  be below one. The CLI rejects legacy alpha/beta/gamma flags with M3 rather than
+  be below one. The M3 entry point rejects legacy alpha/beta/gamma flags rather than
   ignoring them. Temperature must be finite and positive. Its CLI default of 2
   is our configuration default, not an author-recovered value.
 - Exclude PAD rows before softmax; sum along features/vocabulary and average
@@ -154,7 +154,9 @@ Teacher||Student KL and normalized decoder cosine-squared feature loss.
 - Teacher TX and RX stay frozen and in eval mode. Both receivers process the same
   received tensor. Only the Student receiver is optimized. No Teacher retraining,
   MU-interference generator, quantization or new decoding procedure is added.
-- Checkpoint selection remains minimum batch-mean smoothed validation CE.
+- M3 selects by minimum batch-mean smoothed validation CE. The existing
+  trainer currently selects by validation objective loss and records that metric.
+  Align checkpoint selection across arms before a matched publication comparison.
   Unsmoothed token-weighted NLL and `exp(NLL)` are additional reporting metrics.
 
 Manifests and checkpoint metadata contain the method ID, effective coefficients,
@@ -187,14 +189,16 @@ stability check remain local gates, even though historical CSV evidence exists.
 
 ### Command template — requires explicitly chosen validation candidate
 
+Use the dedicated M3 script for new commands. Existing
+`train_multi_vocab_one_student.py --method liu_rx_v1` commands forward to it.
+
 From the pecSC root, set `ETA_DECODER`, `ETA_LOGIT`, `KD_TEMPERATURE` and a new
 `RUN_ID` as environment variables. No production values are supplied by this plan.
 This command uses the recorded data/Teacher locations and matched training settings;
 it is a recipe, not evidence that a run occurred or that normalization is frozen.
 
 ```bash
-uv run python train_multi_vocab_one_student.py \
-  --method liu_rx_v1 \
+uv run python train_liu_rx.py \
   --liu-decoder-weight "${ETA_DECODER:?Set a validation candidate}" \
   --liu-logit-weight "${ETA_LOGIT:?Set a validation candidate}" \
   --temperature "${KD_TEMPERATURE:?Set a validation candidate}" \

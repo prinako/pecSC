@@ -15,6 +15,7 @@ import json
 import math
 import os
 import random
+import sys
 import time
 import warnings
 import numpy as np
@@ -47,14 +48,14 @@ from utils.experiment_manifest import (
     update_selected_checkpoint, write_manifest,
 )
 from utils.publication_data import resolve_training_inputs
-from utils.liu_kd import METHOD_ID, student_teacher_kl, validate_liu_weights
 
 
 
 
 
-def parse_args():
-    parser = argparse.ArgumentParser(description="Receiver-only KD for DeepSC")
+def build_receiver_parser(description):
+    """Arguments shared by the two receiver trainers."""
+    parser = argparse.ArgumentParser(description=description, allow_abbrev=False)
 
     # files
     parser.add_argument(
@@ -116,14 +117,7 @@ def parse_args():
         ),
     )
 
-    # KD
-    parser.add_argument("--method", choices=["receiver_kd", METHOD_ID], default="receiver_kd")
-    parser.add_argument("--liu-decoder-weight", type=float)
-    parser.add_argument("--liu-logit-weight", type=float)
     parser.add_argument("--temperature", type=float, default=2.0)
-    parser.add_argument("--alpha", type=float, default=None, help="Legacy CE weight (default 0.6)")
-    parser.add_argument("--beta", type=float, default=None, help="Legacy output KL weight (default 0.3)")
-    parser.add_argument("--gamma", type=float, default=None, help="Legacy decoder cosine weight (default 0.1)")
     parser.add_argument("--init-student-from-teacher", action="store_true")
     parser.add_argument('--en', default='en_en', type=str)
     parser.add_argument('--en-pt', default='en_pt', type=str)
@@ -135,7 +129,17 @@ def parse_args():
     parser.add_argument('--pt-es', default='pt_es', type=str)
     parser.add_argument('--pt-fr', default='pt_fr', type=str)
 
-    return parser.parse_args()
+    return parser
+
+
+def parse_args(argv=None):
+    parser = build_receiver_parser("Receiver-only KD for DeepSC")
+    parser.add_argument("--method", choices=["receiver_kd"], default="receiver_kd",
+                        help="Use train_liu_rx.py for the Liu baseline")
+    parser.add_argument("--alpha", type=float, default=0.6, help="CE weight")
+    parser.add_argument("--beta", type=float, default=0.3, help="Output KL weight")
+    parser.add_argument("--gamma", type=float, default=0.1, help="Decoder cosine weight")
+    return parser.parse_args(argv)
 
 
 def validate_loss_configuration(alpha: float, beta: float, gamma: float, temperature: float) -> str:
@@ -151,36 +155,9 @@ def validate_loss_configuration(alpha: float, beta: float, gamma: float, tempera
     return "CE-only Student" if beta == 0 and gamma == 0 else "KD Student"
 
 
-def configure_objective(args):
-    """Resolve the method before loading data; never silently ignore loss flags."""
-    method = getattr(args, "method", "receiver_kd")
-    if method == METHOD_ID:
-        if any(getattr(args, key, None) is not None for key in ("alpha", "beta", "gamma")):
-            raise ValueError("Use --liu-decoder-weight/--liu-logit-weight, not --alpha/--beta/--gamma, for liu_rx_v1")
-        args.alpha = validate_liu_weights(
-            args.liu_decoder_weight, args.liu_logit_weight, args.temperature
-        )
-        args.beta = args.liu_logit_weight
-        args.gamma = args.liu_decoder_weight
-        return "Liu et al. receiver-side adaptation"
-    if method != "receiver_kd":
-        raise ValueError(f"Unknown method: {method}")
-    if any(getattr(args, key, None) is not None for key in ("liu_decoder_weight", "liu_logit_weight")):
-        raise ValueError("Liu weights require --method liu_rx_v1")
-    for key, default in (("alpha", 0.6), ("beta", 0.3), ("gamma", 0.1)):
-        if getattr(args, key, None) is None:
-            setattr(args, key, default)
-    return validate_loss_configuration(args.alpha, args.beta, args.gamma, args.temperature)
-
-
 def distillation_terms(s_logits, t_logits, s_decoder, t_decoder, targets, pad_idx, args):
     """Share one loss implementation between train and validation."""
     zero = s_logits.new_zeros(())
-    if getattr(args, "method", "receiver_kd") == METHOD_ID:
-        return (
-            student_teacher_kl(s_logits, t_logits, targets, pad_idx, args.temperature),
-            student_teacher_kl(s_decoder, t_decoder, targets, pad_idx, args.temperature),
-        )
     kd = (kd_kl_loss(s_logits, t_logits, targets, pad_idx, args.temperature)
           if args.beta > 0 else zero)
     feat = (feature_distillation_loss_cosine_normalized(
@@ -191,20 +168,15 @@ def distillation_terms(s_logits, t_logits, s_decoder, t_decoder, targets, pad_id
 
 
 def objective_manifest(args):
-    liu = getattr(args, "method", "receiver_kd") == METHOD_ID
     return {
-        "method": getattr(args, "method", "receiver_kd"),
+        "method": "receiver_kd",
         "alpha": args.alpha, "beta": args.beta, "gamma": args.gamma,
         "temperature": args.temperature, "label_smoothing": 0.1,
-        "kl_direction": "student||teacher" if liu else "teacher||student",
-        "feature_alignment": "temperature-softmax decoder KL student||teacher" if liu else "normalized decoder cosine squared",
+        "kl_direction": "teacher||student",
+        "feature_alignment": "normalized decoder cosine squared",
         "distillation_reduction": "sum final axis; mean non-PAD shifted target tokens",
         "logit_temperature_squared": True,
-        "feature_temperature_squared": liu,
-        **({"source": "10.1109/TWC.2023.3336941; Table I Student 2; Eqs. 25-28",
-            "adaptation": "frozen shared TX; decoder/output transfer only; smoothed causal CE",
-            "liu_decoder_weight": args.liu_decoder_weight,
-            "liu_logit_weight": args.liu_logit_weight} if liu else {}),
+        "feature_temperature_squared": False,
     }
 
 
@@ -774,6 +746,8 @@ def validate_epoch(
     device: torch.device,
     criterion,
     args,
+    *,
+    distill=distillation_terms,
 ):
     transmitter.eval()
     teacher.eval()
@@ -833,7 +807,7 @@ def validate_epoch(
                 label_smoothing=0.1,
             )
 
-            kd, feat = distillation_terms(
+            kd, feat = distill(
                 s_logits, t_logits, s_dec_out, t_rx_dec, trg_real, pad_idx, args
             )
 
@@ -901,6 +875,8 @@ def train(
     epoch,
     args,
     diagnostic_logger=None,
+    *,
+    distill=distillation_terms,
 ):
     for parameter in teacher.parameters():
         parameter.requires_grad = False
@@ -985,7 +961,7 @@ def train(
             label_smoothing=0.1,
         )
 
-        kd, feat = distillation_terms(
+        kd, feat = distill(
             s_logits, t_logits, s_dec_out, t_rx_dec, trg_real, pad_idx, args
         )
 
@@ -1075,9 +1051,13 @@ def train(
     }
 
 
-def main():
-    args = parse_args()
-    model_type = configure_objective(args)
+def run_training(args, *, model_type, loss_config, checkpoint_key,
+                 distill=distillation_terms, method_files=()):
+    """Train a receiver with the supplied objective and validation metric."""
+    selection_rule, selection_metric = {
+        "ce": ("minimum validation cross-entropy", "validation_cross_entropy"),
+        "loss": ("minimum validation objective loss", "validation_objective_loss"),
+    }[checkpoint_key]
     if args.init_student_from_teacher:
         raise ValueError(
             "--init-student-from-teacher is not implemented; publication Students use fresh initialization"
@@ -1216,12 +1196,12 @@ def main():
         "optimizer": {"name": "Adam", "lr": args.lr, "betas": [0.9, 0.98],
                       "eps": 1e-8, "weight_decay": args.weight_decay},
         "implementation_files": {name: file_identity(Path(__file__).resolve().parent / name) for name in (
-            "train_multi_vocab_one_student.py", "utils/liu_kd.py", "utils/kd_utils.py",
-            "utils/model_utils.py", "models/transceiver.py", "models/tx_model.py", "student.py")},
+            "train_multi_vocab_one_student.py", "utils/model_utils.py", "models/transceiver.py",
+            "models/tx_model.py", "student.py", *method_files)},
         "method": args.method,
-        "loss": objective_manifest(args),
+        "loss": loss_config,
         "batch_size": args.batch_size, "epoch_budget": args.epochs,
-        "checkpoint_selection_rule": "minimum validation cross-entropy",
+        "checkpoint_selection_rule": selection_rule,
         "diagnostics": {
             "enabled": args.diagnostic_mode,
             "file": "diagnostics.csv" if args.diagnostic_mode else None,
@@ -1247,6 +1227,7 @@ def main():
             epoch=epoch,
             args=args,
             diagnostic_logger=diagnostic_logger,
+            distill=distill,
         )
 
         val_stats = validate_epoch(
@@ -1260,7 +1241,8 @@ def main():
             channel=args.channel,
             noise_std=noise_std,
             criterion=criterion,
-            args=args
+            args=args,
+            distill=distill,
         )
 
         elapsed = time.time() - start_time
@@ -1302,7 +1284,7 @@ def main():
             latest_path,
             meta={
                 "method": args.method,
-                "loss_configuration": objective_manifest(args),
+                "loss_configuration": loss_config,
                 "epoch": epoch + 1,
                 "val_loss": val_stats["loss"],
                 "temperature": args.temperature,
@@ -1314,8 +1296,8 @@ def main():
         )
 
         # save the best student model        
-        if val_stats["loss"] < best_val:
-            best_val = val_stats["loss"]
+        if val_stats[checkpoint_key] < best_val:
+            best_val = val_stats[checkpoint_key]
 
             best_path = os.path.join(
                 root_dir,
@@ -1327,7 +1309,7 @@ def main():
                 best_path,
                 meta={
                     "method": args.method,
-                    "loss_configuration": objective_manifest(args),
+                    "loss_configuration": loss_config,
                     "epoch": epoch + 1,
                     "val_loss": val_stats["loss"],
                     "val_ce": val_stats["ce"],
@@ -1340,11 +1322,27 @@ def main():
             )
             update_selected_checkpoint(
                 manifest_path, best_path, epoch + 1,
-                "validation_cross_entropy", best_val
+                selection_metric, best_val
             )
 
             print(f"  -> saved best student TR to: {best_path}")
 
+def main(argv=None):
+    argv = sys.argv[1:] if argv is None else argv
+    # Route existing commands to the separate entry point for compatibility.
+    dispatch = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
+    dispatch.add_argument("--method")
+    method, remaining = dispatch.parse_known_args(argv)
+    if method.method == "liu_rx_v1":
+        from train_liu_rx import main as train_liu
+
+        return train_liu(remaining)
+
+    args = parse_args(argv)
+    model_type = validate_loss_configuration(args.alpha, args.beta, args.gamma, args.temperature)
+    return run_training(args, model_type=model_type, loss_config=objective_manifest(args),
+                        checkpoint_key="loss", method_files=("utils/kd_utils.py",))
+
+
 if __name__ == "__main__":
     main()
-

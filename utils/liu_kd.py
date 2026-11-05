@@ -6,7 +6,6 @@ Feature-axis softmax and non-PAD token averaging are explicit adaptation choices
 
 import math
 
-import torch
 import torch.nn.functional as F
 
 
@@ -25,6 +24,40 @@ def validate_liu_weights(decoder_weight, logit_weight, temperature):
     if temperature <= 0:
         raise ValueError("temperature must be positive")
     return 1.0 - decoder_weight - logit_weight
+
+
+def configure_liu_objective(args):
+    """Set the effective CE, output KL, and decoder KL coefficients."""
+    args.alpha = validate_liu_weights(
+        args.liu_decoder_weight, args.liu_logit_weight, args.temperature
+    )
+    args.beta = args.liu_logit_weight
+    args.gamma = args.liu_decoder_weight
+    args.method = METHOD_ID
+
+
+def liu_distillation_terms(s_logits, t_logits, s_decoder, t_decoder, targets, pad_idx, args):
+    return (
+        student_teacher_kl(s_logits, t_logits, targets, pad_idx, args.temperature),
+        student_teacher_kl(s_decoder, t_decoder, targets, pad_idx, args.temperature),
+    )
+
+
+def liu_objective_manifest(args):
+    return {
+        "method": METHOD_ID,
+        "alpha": args.alpha, "beta": args.beta, "gamma": args.gamma,
+        "temperature": args.temperature, "label_smoothing": 0.1,
+        "kl_direction": "student||teacher",
+        "feature_alignment": "temperature-softmax decoder KL student||teacher",
+        "distillation_reduction": "sum final axis; mean non-PAD shifted target tokens",
+        "logit_temperature_squared": True,
+        "feature_temperature_squared": True,
+        "source": "10.1109/TWC.2023.3336941; Table I Student 2; Eqs. 25-28",
+        "adaptation": "frozen shared TX; decoder/output transfer only; smoothed causal CE",
+        "liu_decoder_weight": args.liu_decoder_weight,
+        "liu_logit_weight": args.liu_logit_weight,
+    }
 
 
 def student_teacher_kl(student, teacher, targets, pad_idx, temperature):
