@@ -57,3 +57,17 @@ Synthetic verification:
 ```bash
 uv run pytest -q benchmarks/receiver/test_benchmark.py
 ```
+
+## Plot the report in Jupyter
+
+After running the benchmark, open the [plot notebook](Receiver_Benchmark_Plots.ipynb):
+
+```bash
+uv run --with jupyterlab --with ipykernel jupyter lab benchmarks/receiver/Receiver_Benchmark_Plots.ipynb
+```
+
+Set `REPORT_DIR` to your run directory, or leave it as `None` to load the newest
+complete report under `results/article_kd/receiver_benchmark/`. Run all cells to
+see receiver parameters, checkpoint sizes, median/p95 latency, and the raw timing
+trace. Optionally set `EXPORT_DIR` to a new directory for PNG and PDF figures.
+The notebook uses saved records; plotting requires no GPU or model checkpoints.
