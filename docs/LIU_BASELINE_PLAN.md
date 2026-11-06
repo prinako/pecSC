@@ -198,21 +198,25 @@ This command uses the recorded data/Teacher locations and matched training setti
 it is a recipe, not evidence that a run occurred or that normalization is frozen.
 
 ```bash
-uv run python train_liu_rx.py \
-  --liu-decoder-weight "${ETA_DECODER:?Set a validation candidate}" \
-  --liu-logit-weight "${ETA_LOGIT:?Set a validation candidate}" \
-  --temperature "${KD_TEMPERATURE:?Set a validation candidate}" \
-  --data-dir data/train/europarl_bpe/2026-publication-v1 \
+mkdir ./results/article_kd/diagnostics/m3-liu-dec010-log020-t2-seed42 && \
+  nohup uv run python train_liu_rx.py \
+  --data-dir data/train/europarl_bpe/2026-publication-v2 \
   --vocab-file vocab_bpe.json \
-  --teacher-encoder results/article_kd/training/teacher-bpe32k-seed42/encoder_38.pth \
-  --teacher-decoder results/article_kd/training/teacher-bpe32k-seed42/decoder_38.pth \
+  --teacher-encoder results/article_kd/training/teacher-v2-bpe32k-seed42/encoder_37.pth \
+  --teacher-decoder results/article_kd/training/teacher-v2-bpe32k-seed42/decoder_37.pth \
   --save-dir results/article_kd/diagnostics \
-  --experiment-id "${RUN_ID:?Choose a fresh immutable run ID}" \
-  --seed 42 --student_num_layers 4 --student_num_heads 8 \
-  --num-layers 8 --num-heads 16 --max-len 67 --d-model 128 --dff 512 \
-  --channel Rayleigh --snr-mode range --snr-db-low 0 --snr-db-high 20 \
-  --val-snr-db 8 --batch-size 32 --epochs 10 --lr 1e-4 \
-  --weight-decay 0 --dropout 0.1 --grad-clip 1 --diagnostic-mode
+  --experiment-id m3-liu-dec010-log020-t2-seed42 \
+  --seed 42 \
+  --student_num_layers 4 --student_num_heads 8 \
+  --num-layers 8 --num-heads 16 \
+  --max-len 99 --d-model 128 --dff 512 \
+  --channel Rayleigh --snr-mode range \
+  --snr-db-low 2 --snr-db-high 18 --val-snr-db 8 \
+  --batch-size 32 --epochs 10 --lr 1e-4 \
+  --weight-decay 0 --dropout 0.1 --grad-clip 1 \
+  --liu-decoder-weight 0.10 --liu-logit-weight 0.20 \
+  --temperature 1 --diagnostic-mode \
+  > ./results/article_kd/diagnostics/m3-liu-dec010-log020-t2-seed42/logo.txt 2>&1 &
 ```
 
 ### Verification and remaining work
