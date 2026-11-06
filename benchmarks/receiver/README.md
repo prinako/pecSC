@@ -71,3 +71,95 @@ complete report under `results/article_kd/receiver_benchmark/`. Run all cells to
 see receiver parameters, checkpoint sizes, median/p95 latency, and the raw timing
 trace. Optionally set `EXPORT_DIR` to a new directory for PNG and PDF figures.
 The notebook uses saved records; plotting requires no GPU or model checkpoints.
+
+## Measure reconstruction quality
+
+The quality evaluator uses the **same four selected manifests** as the cost
+benchmark. It loads the verified Teacher encoder, generates one received tensor
+per batch, then decodes it with M0–M3 using the existing BPE greedy decoder.
+Every model starts with `[START, EN]`, has the same decode budget, and stops at EOS.
+The cost benchmark remains a separate fixed-work measurement.
+
+Start with a small **validation smoke run**. Set the manifest and vocabulary
+variables as above, and `DATA_DIR` to the matching publication dataset directory:
+
+```bash
+uv run python -m benchmarks.receiver.quality \
+  --m0-manifest "${M0_MANIFEST:?Set the Teacher manifest path}" \
+  --m1-manifest "${M1_MANIFEST:?Set the CE Student manifest path}" \
+  --m2-manifest "${M2_MANIFEST:?Set the combined KD manifest path}" \
+  --m3-manifest "${M3_MANIFEST:?Set the Liu Student manifest path}" \
+  --data-dir "${DATA_DIR:?Set the matching publication dataset directory}" \
+  --vocab-file "${BPE_VOCAB:?Set the matching vocab_bpe.json path}" \
+  --output-dir results/article_kd/receiver_quality/val-smoke-seed42 \
+  --split val --max-examples 64 --channel Rayleigh \
+  --snr-db 4 8 12 --trial-seeds 1001 1002 \
+  --batch-size 8 --device cuda
+```
+
+Each selected receiver checkpoint must be beside its manifest, and the Teacher
+encoder must also be beside the Teacher manifest. The dataset manifest, split ID
+file, tokenizer, and chosen split are hash-checked before loading. The command
+uses the current batch unit-RMS transmitter normalization, and verifies the
+recorded normalization and other training controls. A validation run can report
+exploratory comparisons with mismatched controls; its manifest records those
+warnings. M1 must still be CE-only, M2 must include both KD terms, and M3 must
+identify `liu_rx_v1`.
+
+The semantic encoder defaults to the project's multilingual MPNet model. It
+loads through Sentence Transformers and may need to download model weights on
+the first run. Use `--semantic-device cuda` if there is enough GPU memory, or leave
+the default CPU setting. Record a fixed model commit with `--semantic-revision`
+for reproducible runs. The evaluator does not enable remote model code.
+
+| Metric | Definition |
+|---|---|
+| `bleu` | SacreBLEU corpus BLEU, 13a tokenization and exponential smoothing, 0–100 |
+| `chrf` | SacreBLEU corpus chrF++ with word order 2, 0–100 |
+| `semantic_similarity` | Mean cosine between normalized sentence embeddings |
+| `rouge_l` | Mean stemmed sentence ROUGE-L F1, 0–1 |
+| `token_accuracy` | Mean position-wise accuracy after re-encoding both decoded strings with the same BPE model; denominator is the longer token count |
+
+Text metrics use NFKC, lowercase, and collapsed whitespace. A trial score covers
+the entire evaluated slice, and the summary reports mean and sample SD across
+channel trials for one fixed training seed. The SD is not a confidence interval
+or a measure of variation across training seeds.
+
+The output directory contains:
+
+- `predictions.csv`: reference and hypothesis, split row index, model, SNR, trial,
+  and receiver checkpoint hash.
+- `trial_metrics.csv`: the five metrics for each model/SNR/trial.
+- `quality_summary.csv`: means and SDs for plotting.
+- `paired_differences.csv`: differences against M1 on each shared trial.
+- `quality_manifest.json`: workload, model/dataset/code identities, metric
+  signatures, environment, and training-control warnings. The manifest is
+  written after a successful run.
+
+Open [Receiver_Quality_Plots.ipynb](Receiver_Quality_Plots.ipynb) to plot the saved
+report. It shows the five SNR curves, their trial spread, and paired differences:
+
+```bash
+uv run --with jupyterlab --with ipykernel \
+  jupyter lab benchmarks/receiver/Receiver_Quality_Plots.ipynb
+```
+
+Use `REPORT_DIR` to select a report, or leave it unset to load the newest complete
+report under `results/article_kd/receiver_quality/`. Set `EXPORT_DIR` for PNG/PDF.
+The notebook reads saved scores and does not load models.
+
+For the article, freeze the checkpoint set, channel/SNR grid, trial seeds,
+decoding budget, and semantic model revision using validation first. Then run
+with `--split test`, a pinned 40-character `--semantic-revision`, no
+`--max-examples`, and a new output directory. Test evaluation rejects unmatched
+Student controls and KD checkpoints selected by composite loss. Keep each Student
+`training.csv` beside its manifest so the evaluator can verify the selected epoch
+and value against the minimum recorded validation CE. M1's recorded
+objective loss is equivalent to CE when its weights are 1/0/0. The evaluator does
+not reselect checkpoints or compare training seeds as independent channel trials.
+
+Synthetic verification (no real model download or held-out data access):
+
+```bash
+uv run pytest -q benchmarks/receiver/test_benchmark.py benchmarks/receiver/test_quality.py
+```
