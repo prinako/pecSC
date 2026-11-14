@@ -23,6 +23,19 @@ uv run python -m benchmarks.receiver \
   --warmup 5 --repeats 30 --input-seed 1001
 ```
 
+```bash
+uv run python -m benchmarks.receiver \
+  --m0-manifest results/article_kd/training/teacher-v2-bpe32k-seed42/manifest.json \
+  --m1-manifest results/article_kd/training/student-ce_only-seed42/manifest.json \
+  --m2-manifest results/article_kd/training/student-bpe32k-kd_comb-A0_5-B0_5-seed42/manifest.json\
+  --m3-manifest results/article_kd/training/m3-liu-dec010-log020-t2-seed42/manifest.json \
+  --vocab-file data/train/europarl_bpe/2026-publication-v2/vocab_bpe.json \
+  --output-dir results/article_kd/receiver_benchmark-v3/seed42-b1-src32-steps24 \
+  --device cuda \
+  --batch-size 1 --source-length 32 --decode-steps 24 \
+  --warmup 5 --repeats 30
+```
+
 Use `--device cpu` for CPU measurements, or `--device auto` to select CUDA
 when available. Use a fresh output directory for each run. Batch size one reports
 latency per example; other batch sizes report batch latency. Repeat at additional
@@ -93,6 +106,22 @@ uv run python -m benchmarks.receiver.quality \
   --vocab-file "${BPE_VOCAB:?Set the matching vocab_bpe.json path}" \
   --output-dir results/article_kd/receiver_quality/val-smoke-seed42 \
   --split val --max-examples 64 --channel Rayleigh \
+  --snr-db 4 8 12 --trial-seeds 1001 1002 \
+  --batch-size 8 --device cuda
+```
+
+
+
+```bash
+uv run python -m benchmarks.receiver.quality \
+  --m0-manifest results/article_kd/training/teacher-v2-bpe32k-seed42/manifest.json \
+  --m1-manifest results/article_kd/training/student-ce_only-seed42/manifest.json  \
+  --m2-manifest results/article_kd/training/student-bpe32k-kd_comb-A0_5-B0_5-seed42/manifest.json \
+  --m3-manifest  results/article_kd/training/m3-liu-dec010-log020-t2-seed42/manifest.json \
+  --data-dir data/train/europarl_bpe/2026-publication-v2 \
+  --vocab-file data/train/europarl_bpe/2026-publication-v2/vocab_bpe.json \
+  --output-dir results/article_kd/receiver_quality/val-smoke-v3-seed42 \
+  --split val --max-examples 100 --channel Rayleigh \
   --snr-db 4 8 12 --trial-seeds 1001 1002 \
   --batch-size 8 --device cuda
 ```
