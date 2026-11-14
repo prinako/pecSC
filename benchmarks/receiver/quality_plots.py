@@ -17,7 +17,8 @@ NAMES = ("M0 · Teacher", "M1 · CE only", "M2 · Combined KD", "M3 · Liu adapt
 def plot_quality(summary, manifest):
     """Plot means and sample SD across channel trials for a single training seed."""
     fig, axes = plt.subplots(2, 3, figsize=(13, 7), layout="constrained")
-    for ax, (metric, label) in zip(axes.flat, LABELS.items()):
+    for index, (ax, (metric, label)) in enumerate(zip(axes.flat, LABELS.items())):
+        ax.set_title(f"({chr(ord('a') + index)})", loc="left", fontweight="bold")
         for model, color, name in zip(MODELS, COLORS, NAMES):
             rows = summary.loc[summary["model"].eq(model)].sort_values("snr_db")
             if rows.empty:
