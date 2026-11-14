@@ -18,7 +18,6 @@ def plot_quality(summary, manifest):
     """Plot means and sample SD across channel trials for a single training seed."""
     fig, axes = plt.subplots(2, 3, figsize=(13, 7), layout="constrained")
     for index, (ax, (metric, label)) in enumerate(zip(axes.flat, LABELS.items())):
-        ax.set_title(f"({chr(ord('a') + index)})", loc="left", fontweight="bold")
         for model, color, name in zip(MODELS, COLORS, NAMES):
             rows = summary.loc[summary["model"].eq(model)].sort_values("snr_db")
             if rows.empty:
@@ -29,7 +28,9 @@ def plot_quality(summary, manifest):
             ax.plot(x, mean, marker="o", linewidth=1.5, color=color, label=name)
             if rows["trials"].min() > 1:
                 ax.fill_between(x, mean - sd, mean + sd, color=color, alpha=0.11)
-        ax.set(xlabel="Nominal SNR (dB)", ylabel=label)
+        panel = chr(ord("a") + index)
+        ax.set_xlabel("Nominal SNR (dB)\n" + rf"$\mathbf{{({panel})}}$", loc="center")
+        ax.set_ylabel(label)
         ax.grid(alpha=0.25)
     legend = axes.flat[-1]
     legend.axis("off")
