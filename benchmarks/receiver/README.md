@@ -115,14 +115,14 @@ uv run python -m benchmarks.receiver.quality \
 ```bash
 uv run python -m benchmarks.receiver.quality \
   --m0-manifest results/article_kd/training/teacher-v2-bpe32k-seed42/manifest.json \
-  --m1-manifest results/article_kd/training/student-ce_only-seed42/manifest.json  \
+  --m1-manifest results/article_kd/training/student-bpe32k-kd_only-seed42/manifest.json  \
   --m2-manifest results/article_kd/training/student-bpe32k-kd_comb-A0_5-B0_5-seed42/manifest.json \
   --m3-manifest  results/article_kd/training/m3-liu-dec010-log020-t2-seed42/manifest.json \
   --data-dir data/train/europarl_bpe/2026-publication-v2 \
   --vocab-file data/train/europarl_bpe/2026-publication-v2/vocab_bpe.json \
-  --output-dir results/article_kd/receiver_quality/val-smoke-v3-seed42 \
+  --output-dir results/article_kd/receiver_quality/val-smoke-v4-seed42 \
   --split val --max-examples 100 --channel Rayleigh \
-  --snr-db 4 8 12 --trial-seeds 1001 1002 \
+  --snr-db 2 4 6 8 10 12 14 16 --trial-seeds 1001 1002 \
   --batch-size 8 --device cuda
 ```
 
@@ -149,10 +149,14 @@ for reproducible runs. The evaluator does not enable remote model code.
 | `rouge_l` | Mean stemmed sentence ROUGE-L F1, 0–1 |
 | `token_accuracy` | Mean position-wise accuracy after re-encoding both decoded strings with the same BPE model; denominator is the longer token count |
 
-Text metrics use NFKC, lowercase, and collapsed whitespace. A trial score covers
-the entire evaluated slice, and the summary reports mean and sample SD across
-channel trials for one fixed training seed. The SD is not a confidence interval
-or a measure of variation across training seeds.
+All metrics use NFKC, lowercase, and collapsed whitespace. BLEU, chrF, semantic
+similarity, and ROUGE-L additionally remove spaces before `. ! ? , ; :` to undo
+the punctuation spacing introduced by BPE preprocessing. Token accuracy instead
+re-encodes the model-normalized text before that natural-text detokenization so
+punctuation token boundaries retain their training-time meaning. A trial score
+covers the entire evaluated slice, and the summary reports mean and sample SD
+across channel trials for one fixed training seed. The SD is not a confidence
+interval or a measure of variation across training seeds.
 
 The output directory contains:
 

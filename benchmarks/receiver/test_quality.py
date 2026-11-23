@@ -37,6 +37,24 @@ def test_corpus_metrics_and_token_length_penalty():
     assert scores["longer"]["rouge_l"] < 1
 
 
+def test_natural_text_detokenization_does_not_redefine_bpe_accuracy():
+    class WordIds:
+        def encode(self, texts):
+            return [text.split() for text in texts]
+
+    scorer = QualityScorer(WordIds(), SyntheticEmbeddings(), 1)
+    scores = scorer.score_trial(
+        ["one two three four ."],
+        {"attached": ["one two three four."]},
+    )["attached"]
+
+    assert scores["bleu"] == pytest.approx(100)
+    assert scores["chrf"] == pytest.approx(100)
+    assert scores["semantic_similarity"] == pytest.approx(1)
+    assert scores["rouge_l"] == pytest.approx(1)
+    assert scores["token_accuracy"] == pytest.approx(3 / 5)
+
+
 @pytest.fixture
 def quality_inputs(tmp_path, artifacts):
     paths, vocab_path = artifacts

@@ -1,6 +1,7 @@
 """Corpus reconstruction metrics with bounded semantic-embedding memory."""
 
 import math
+import re
 import unicodedata
 
 import numpy as np
@@ -10,8 +11,14 @@ from sacrebleu.metrics import BLEU, CHRF
 METRICS = ("bleu", "chrf", "semantic_similarity", "rouge_l", "token_accuracy")
 
 
-def normalize(text):
+def normalize_model_text(text):
+    """Match the normalized text representation used to train the BPE model."""
     return " ".join(unicodedata.normalize("NFKC", text).lower().split())
+
+
+def detokenize_natural_text(text):
+    """Undo punctuation spacing for metrics that expect natural text."""
+    return re.sub(r"\s+([.!?,;:])", r"\1", text)
 
 
 class QualityScorer:
@@ -33,9 +40,12 @@ class QualityScorer:
             len(values) != len(references) for values in hypotheses.values()
         ):
             raise ValueError("Quality scoring requires equal nonempty corpora")
-        refs = [normalize(text) for text in references]
-        hyps = {name: [normalize(text) for text in values]
-                for name, values in hypotheses.items()}
+        token_refs = [normalize_model_text(text) for text in references]
+        token_hyps = {name: [normalize_model_text(text) for text in values]
+                      for name, values in hypotheses.items()}
+        refs = [detokenize_natural_text(text) for text in token_refs]
+        hyps = {name: [detokenize_natural_text(text) for text in values]
+                for name, values in token_hyps.items()}
         n = len(refs)
         scores = {name: {
             "bleu": self.bleu.corpus_score(values, [refs]).score,
@@ -46,7 +56,7 @@ class QualityScorer:
             stop = start + self.batch_size
             ref_batch = refs[start:stop]
             ref_emb = self.encode(ref_batch)
-            ref_ids = self.tokenizer.encode(ref_batch)
+            ref_ids = self.tokenizer.encode(token_refs[start:stop])
             for name, values in hyps.items():
                 hyp_batch = values[start:stop]
                 score = scores[name]
@@ -55,7 +65,7 @@ class QualityScorer:
                 )
                 score["rouge_l"] += sum(self.rouge.score(ref, hyp)["rougeL"].fmeasure
                                         for ref, hyp in zip(ref_batch, hyp_batch))
-                for ref, hyp in zip(ref_ids, self.tokenizer.encode(hyp_batch)):
+                for ref, hyp in zip(ref_ids, self.tokenizer.encode(token_hyps[name][start:stop])):
                     denominator = max(len(ref), len(hyp))
                     score["token_accuracy"] += (
                         sum(a == b for a, b in zip(ref, hyp)) / denominator if denominator else 1.0
@@ -69,7 +79,7 @@ class QualityScorer:
 
     def signatures(self):
         return {"bleu": str(self.bleu.get_signature()), "chrf": str(self.chrf.get_signature()),
-                "text_normalization": "NFKC, lowercase, whitespace collapsed",
+                "text_normalization": "NFKC, lowercase, whitespace collapsed; spaces before .!?,;: removed for natural-text metrics",
                 "semantic_similarity": "mean cosine of L2-normalized sentence embeddings",
                 "rouge_l": "mean sentence ROUGE-L F1, English stemming",
-                "token_accuracy": "mean position-wise BPE accuracy after re-encoding normalized text; denominator max(ref, hyp) length"}
+                "token_accuracy": "mean position-wise BPE accuracy after re-encoding model-normalized text before natural-text detokenization; denominator max(ref, hyp) length"}

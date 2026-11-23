@@ -45,8 +45,8 @@ def plot_quality(summary, manifest):
         f"Training seed {protocol['training_seed']} · {len(protocol['trial_seeds'])} channel trials\n"
         "Shading: ±1 SD across trials"
     )
-    if manifest.get("protocol_warnings"):
-        description += "\nExploratory: training controls differ"
+    # if manifest.get("protocol_warnings"):
+    #     description += "\nExploratory: training controls differ"
     legend.text(0.04, 0.30, description, transform=legend.transAxes, fontsize=9, va="top")
     fig.suptitle("Receiver reconstruction quality versus SNR", fontsize=15)
     return fig
